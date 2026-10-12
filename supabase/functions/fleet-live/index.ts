@@ -272,13 +272,23 @@ async function buildLive(): Promise<any> {
   const { sites, hidden } = await loadConfig();
   const end = new Date(), start = new Date(end.getTime() - 24 * 3600_000);
 
-  const [locs, assigns, trailerStats] = await Promise.all([
+  const [locs, assigns, trailerStats, engineRows] = await Promise.all([
     samsaraAll("/fleet/vehicles/locations"),
     samsaraAll("/fleet/driver-vehicle-assignments", {
       startTime: start.toISOString(), endTime: end.toISOString(), filterBy: "drivers",
     }).catch((e) => { console.log("assignments failed: " + e); return []; }),
     samsaraAll("/fleet/trailers/stats", { types: "gps", limit: "200" }),
+    // engine on/off and when it last changed: "off since August" = hasn't moved since August
+    samsaraAll("/fleet/vehicles/stats", { types: "engineStates" })
+      .catch((e) => { console.log("engine states failed: " + e); return []; }),
   ]);
+
+  const engineBy: Record<string, { value: string; since: string | null }> = {};
+  for (const v of engineRows) {
+    const e = v?.engineState ?? v?.engineStates;
+    const latest = Array.isArray(e) ? e[e.length - 1] : e;
+    if (v?.id && latest?.value) engineBy[String(v.id)] = { value: String(latest.value), since: latest.time || null };
+  }
 
   const driverBy = pickAssignments(assigns);
 
@@ -299,6 +309,8 @@ async function buildLive(): Promise<any> {
         time: L.time || null,
         address: L.reverseGeo?.formattedLocation || "",
         site: siteFor(lat, lng, sites),
+        engine: engineBy[String(v.id)]?.value ?? null,
+        engineSince: engineBy[String(v.id)]?.since ?? null,
       };
     });
 

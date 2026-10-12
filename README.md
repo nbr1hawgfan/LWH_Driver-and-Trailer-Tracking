@@ -80,9 +80,13 @@ On phones: open the URL → Share → **Add to Home Screen**.
 - **Phone:** the map fills the screen. Drag the panel at the bottom up for the list, or tap its handle. Tap any row to fly to it.
 - **PC:** the list sits in a panel on the left of the map.
 - **Tap a truck** to see its last 8 hours as a blue route, with each stop of 5+ minutes labeled with how long it sat. Tap the map to clear it.
+- **Inactive** button: trucks with no GPS or engine off for 60+ days, and trailers with no GPS for 30+ days, are hidden until you tap it.
+  Parked trucks show how long they've sat ("Parked since Fri 5:42 PM").
 - Moving trucks glide between updates and show their speed on the badge: amber at 60+, red at 70+.
 - A trailer that's being pulled rides inside its truck's badge instead of getting its own marker.
 - Round buttons on the right: satellite view, back to my site, show everything.
+- **Street View:** button in every truck/trailer popup. Opens Google's nearest street photo, facing the truck or trailer.
+  Photos can be months or years old and only cover public roads. Billing: 5,000 free views a month, then $14 per 1,000.
 - **Crowded spots group up** when zoomed out: one bubble per yard or lot, like "Truck Yard: 9 trucks, 7 trailers"
   (or the street name for unlisted lots, like "8201 Chad Colley Boulevard"). Tap to zoom in. For a single packed lot,
   tapping lists everything there; tap a name to fly to it. Moving trucks are never grouped.
@@ -101,7 +105,7 @@ On phones: open the URL → Share → **Add to Home Screen**.
 | File | What |
 |---|---|
 | `index.html`, `styles.css`, `app.js` | the PWA |
-| `config.js` | function URL, Google Maps key, refresh rate (30s), stale-GPS cutoffs (trucks 2 hr, trailers 24 hr), dead-GPS days (30) |
+| `config.js` | function URL, Google Maps key, refresh rate (30s), stale-GPS cutoffs (trucks 2 hr, trailers 24 hr), inactive cutoffs (trailers 30 days, trucks 60 days) |
 | `sw.js` | offline app shell; bump `VERSION` on each release |
 | `supabase/functions/fleet-live/index.ts` | the Samsara proxy |
 | `supabase/migrations/…sql` | tables + seed data (v1 and v2, both already applied) |

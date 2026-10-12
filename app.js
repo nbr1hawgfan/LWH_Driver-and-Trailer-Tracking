@@ -284,6 +284,27 @@
     var age = ageMin(r.time);
     return age != null && age > (CFG.DEAD_GPS_DAYS || 30) * 1440;
   }
+  // A truck is inactive if it hasn't reported GPS, or its engine has been off, for 60+ days.
+  function isInactiveTruck(t) {
+    var limit = (CFG.TRUCK_INACTIVE_DAYS || 60) * 1440;
+    var gps = ageMin(t.time);
+    if (gps != null && gps > limit) return true;
+    return t.engine === 'Off' && t.engineSince != null && ageMin(t.engineSince) > limit;
+  }
+  function inactiveSince(t) {
+    var a = t.time ? Date.parse(t.time) : Infinity;
+    var b = t.engine === 'Off' && t.engineSince ? Date.parse(t.engineSince) : Infinity;
+    var d = new Date(Math.min(a, b));
+    return isNaN(d) ? '' : d.toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' });
+  }
+  // "Fri 5:42 PM" within the last week, otherwise "Oct 3"
+  function sinceText(iso) {
+    var d = new Date(iso);
+    if (isNaN(d)) return '';
+    var days = (Date.now() - d) / 86400000;
+    return days < 6 ? d.toLocaleDateString([], { weekday: 'short' }) + ' ' + d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
+                    : d.toLocaleDateString([], { month: 'short', day: 'numeric' });
+  }
 
   // Where an asset is relative to your site, in plain words.
   function describe(a, site, kind) {
@@ -309,19 +330,23 @@
       } else if (moving) {
         out.label = 'Driving, not toward you'; out.mph = a.speed;
       } else {
-        out.label = 'Parked';
+        out.label = (kind === 'truck' && a.engine === 'Off' && a.engineSince) ? 'Parked since ' + sinceText(a.engineSince) : 'Parked';
       }
     }
     if (stale) { out.cls = 'stale'; out.mph = null; out.label = 'Last GPS ' + agoText(age); }
+    if (kind === 'truck' && a.engine !== undefined && isInactiveTruck(a)) {
+      out.cls = 'stale'; out.mph = null; out.eta = null; out.group = 'other';
+      out.label = 'Inactive since ' + inactiveSince(a);
+    }
     return out;
   }
 
   // ---------------- render ----------------
   function render() {
     if (!S.data) return;
-    var deadN = S.data.trailers.filter(isDead).length;
+    var deadN = S.data.trailers.filter(isDead).length + S.data.trucks.filter(isInactiveTruck).length;
     var chip = document.querySelector('.chip[data-filter="dead"]');
-    chip.textContent = 'No GPS 30d+ (' + deadN + ')';
+    chip.textContent = 'Inactive (' + deadN + ')';
     chip.hidden = deadN === 0;
     renderList();
     renderMap();
@@ -348,6 +373,7 @@
   function visibleTrucks(pulls) {
     if (!S.filters.trucks) return [];
     return S.data.trucks.filter(function (t) {
+      if (!S.filters.dead && isInactiveTruck(t)) return false;
       var trs = pulls[t.id] || [];
       if (S.filters.empty && !trs.some(function (r) { return r.load && r.load.status === 'empty'; })) return false;
       return matchesSearch(t, trs.map(function (r) { return r.name; }));
@@ -633,6 +659,9 @@
     S.proj.onAdd = function () {}; S.proj.draw = function () {}; S.proj.onRemove = function () {};
     S.proj.setMap(S.map);
     S.map.addListener('idle', recluster);
+    // while Street View is open, our search bar / panel / buttons step aside
+    var sv = S.map.getStreetView();
+    sv.addListener('visible_changed', function () { document.body.classList.toggle('sv-on', !!sv.getVisible()); });
     if (S.data) render();
   }
 
@@ -733,17 +762,51 @@
     }
     return '<div class="pop"><div class="pop-name">' + esc(displayName('truck', t.name)) + '</div>' +
       '<div class="pop-sub">' + esc(t.driver || 'No driver assigned') + '</div>' +
-      '<div class="pop-sub">' + (t.speed > MOVING_MPH ? Math.round(t.speed) + ' mph' : 'Parked') + (t.site ? ', at ' + esc(t.site) : '') + '</div>' +
+      '<div class="pop-sub">' + (isInactiveTruck(t) ? 'Inactive since ' + esc(inactiveSince(t))
+          : t.speed > MOVING_MPH ? Math.round(t.speed) + ' mph'
+          : (t.engine === 'Off' && t.engineSince ? 'Parked since ' + esc(sinceText(t.engineSince)) : 'Parked')) +
+        (t.site ? ', at ' + esc(t.site) : '') + '</div>' +
       (pulls && pulls.length ? '<div class="pop-sub">Likely pulling ' + pulls.map(function (r) { return esc(r.name) + (r.load ? ' (' + r.load.status + ')' : ''); }).join(', ') + '</div>' : '') +
       '<div class="pop-meta">' + esc(t.address || '') + (t.address ? '<br>' : '') + 'GPS ' + esc(agoText(ageMin(t.time))) + '</div>' +
-      route + '</div>';
+      svButton(t.lat, t.lng) + route + '</div>';
   }
   function trailerPopup(r, tk) {
     return '<div class="pop"><div class="pop-name">' + esc(displayName('trailer', r.name)) + '</div>' +
       '<div class="pop-sub">' + (r.load ? (r.load.status === 'empty' ? 'Empty' : 'Loaded') : 'Status not set') + (r.site ? ', at ' + esc(r.site) : '') + '</div>' +
       (tk ? '<div class="pop-sub">Likely with ' + esc(displayName('truck', tk.name)) + (tk.driver ? ', ' + esc(tk.driver) : '') + '</div>' : '') +
-      '<div class="pop-meta">' + esc(r.address || '') + (r.address ? '<br>' : '') + 'GPS ' + esc(agoText(ageMin(r.time))) + '</div></div>';
+      '<div class="pop-meta">' + esc(r.address || '') + (r.address ? '<br>' : '') + 'GPS ' + esc(agoText(ageMin(r.time))) + '</div>' +
+      svButton(r.lat, r.lng) + '</div>';
   }
+
+  // ---------------- Street View ----------------
+  // Google bills each opened view (5,000 free a month), so it only loads on tap.
+  function svButton(lat, lng) {
+    return '<button type="button" class="sv-btn" data-sv="' + lat + ',' + lng + '">' +
+      '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="5" r="2.5"/><path d="M9 9h6l-1 7h-1.2l-.8 5h-1l-.8-5H9z"/></svg>Street View</button>';
+  }
+  function openStreetView(lat, lng) {
+    if (!S.map || !google.maps.StreetViewService) return;
+    var target = new google.maps.LatLng(lat, lng);
+    new google.maps.StreetViewService().getPanorama(
+      { location: target, radius: 150, source: google.maps.StreetViewSource ? google.maps.StreetViewSource.OUTDOOR : undefined },
+      function (data, status) {
+        if (status !== 'OK' || !data || !data.location) { toast('No Street View photos near this spot.', 4000); return; }
+        var from = data.location.latLng;
+        var pano = S.map.getStreetView();
+        pano.setOptions({ addressControl: true, enableCloseButton: true, fullscreenControl: false, motionTracking: false, motionTrackingControl: false });
+        pano.setPano(data.location.pano);
+        // look from the photo spot toward the truck/trailer
+        pano.setPov({ heading: bearing(from.lat(), from.lng(), lat, lng), pitch: 0 });
+        pano.setVisible(true);
+        S.info.close();
+      });
+  }
+  document.addEventListener('click', function (e) {
+    var b = e.target.closest('[data-sv]');
+    if (!b) return;
+    var p = b.getAttribute('data-sv').split(',');
+    openStreetView(Number(p[0]), Number(p[1]));
+  });
 
   function select(key) {
     var prev = S.selKey;

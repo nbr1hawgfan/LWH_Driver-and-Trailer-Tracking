@@ -15,6 +15,9 @@ window.FLEET_CONFIG = {
   // Trucks report constantly; parked trailer gateways only every few hours.
   TRUCK_STALE_MINUTES: 120,
   TRAILER_STALE_MINUTES: 1440,
-  // Trailers silent this long are tucked behind the "No GPS 30d+" toggle
-  DEAD_GPS_DAYS: 30
+  // Tucked behind the "Inactive" button:
+  //   trailers with no GPS for this many days
+  DEAD_GPS_DAYS: 30,
+  //   trucks with no GPS, or engine off, for this many days
+  TRUCK_INACTIVE_DAYS: 60
 };
