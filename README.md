@@ -45,7 +45,19 @@ supabase functions deploy fleet-live --no-verify-jwt --project-ref tjivcqxnkftuj
 or Dashboard → Edge Functions → Deploy a new function → name it `fleet-live` → paste
 `supabase/functions/fleet-live/index.ts` → **turn OFF "Verify JWT"** → Deploy.
 
-### 4. GitHub Pages
+### 4. Google Maps key
+Google Cloud Console → APIs & Services → Credentials → your key → **Edit**:
+- **Application restrictions:** Websites → add `https://nbr1hawgfan.github.io/*`
+- **API restrictions:** Restrict key → **Maps JavaScript API** only
+- Make sure **Maps JavaScript API** is enabled (APIs & Services → Library) and the project has a billing account.
+- Recommended: Maps JavaScript API → Quotas → cap **map loads per day** around 300, and add a $5 budget alert under Billing.
+
+Then paste the key into `config.js` → `GOOGLE_MAPS_KEY`.
+
+Cost: Google bills per map *load* (each time the app is opened), with 10,000 free per month.
+4 managers × 10 opens/day ≈ 1,200/month → **$0**. The 30-second refresh moves markers; it is not a new load.
+
+### 5. GitHub Pages
 Create repo `LWH-Fleet-View`, upload everything **except** the `supabase/` folder
 (it's fine to include, nothing secret in it). Settings → Pages → Deploy from branch → `main` / root.
 App URL: `https://nbr1hawgfan.github.io/LWH-Fleet-View/`
@@ -76,7 +88,7 @@ On phones: open the URL → Share → **Add to Home Screen**.
 | File | What |
 |---|---|
 | `index.html`, `styles.css`, `app.js` | the PWA |
-| `config.js` | function URL, refresh rate (30s), stale-GPS cutoff (2 hr) |
+| `config.js` | function URL, Google Maps key, refresh rate (30s), stale-GPS cutoffs (trucks 2 hr, trailers 24 hr), dead-GPS days (30) |
 | `sw.js` | offline app shell; bump `VERSION` on each release |
 | `supabase/functions/fleet-live/index.ts` | the Samsara proxy |
 | `supabase/migrations/…sql` | tables + seed data |

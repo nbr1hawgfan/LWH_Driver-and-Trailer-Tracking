@@ -22,9 +22,9 @@
     loading: false,
     filters: { trucks: true, trailers: true, empty: false, dead: false, q: '' },
     map: null,
-    layers: null,
     markers: {},       // key "t:<id>" / "r:<id>" -> marker
-    siteLayer: null,
+    info: null,
+    infoKey: null,
     sitesDrawn: false,
     centeredOnce: false,
     pendingLoad: {}    // trailerId -> status while saving
@@ -170,7 +170,6 @@
     Array.prototype.forEach.call(document.querySelectorAll('.tab'), function (t) {
       t.classList.toggle('active', t.getAttribute('data-view') === v);
     });
-    if (v === 'map' && S.map) setTimeout(function () { S.map.invalidateSize(); }, 30);
   }
   Array.prototype.forEach.call(document.querySelectorAll('.tab'), function (t) {
     t.addEventListener('click', function () { setView(t.getAttribute('data-view')); });
@@ -196,7 +195,7 @@
     store('fv_site', S.siteName);
     render();
     var site = currentSite();
-    if (site && site.center && S.map) S.map.setView([site.center.latitude, site.center.longitude], 11);
+    if (site && site.center) centerOn(site.center.latitude, site.center.longitude, 11);
   });
 
   // ---------------- data ----------------
@@ -460,91 +459,171 @@
     });
   }
 
-  // ---------------- map ----------------
+  // ---------------- map (Google Maps) ----------------
+  // One map load per app open. The 30s refresh only moves existing
+  // markers, which Google does not bill as new loads.
+  var HtmlMarker = null;   // defined once the Google script is loaded
+  var mapsLoading = false;
+
+  function mapNote(msg) {
+    $('map').innerHTML = '<p class="empty-note" style="padding:16px">' + esc(msg) + '</p>';
+  }
+
   function initMap() {
-    if (S.map) { setTimeout(function () { S.map.invalidateSize(); }, 50); return; }
-    if (!window.L) {
-      // Map library didn't load (bad signal, blocked CDN) — the list still works.
-      $('map').innerHTML = '<p class="empty-note" style="padding:16px">Map could not load. The Nearby list still works.</p>';
-      return;
+    if (S.map || mapsLoading) return;
+    if (!CFG.GOOGLE_MAPS_KEY) { mapNote('Map not set up yet (no Google Maps key). The Nearby list still works.'); return; }
+    mapsLoading = true;
+    window.gm_authFailure = function () {
+      S.map = null;
+      mapNote('Google Maps rejected the key. Check its website restriction. The Nearby list still works.');
+    };
+    window.__fvMapsReady = function () { mapsLoading = false; createMap(); };
+    var s = document.createElement('script');
+    s.src = 'https://maps.googleapis.com/maps/api/js?key=' + encodeURIComponent(CFG.GOOGLE_MAPS_KEY) +
+      '&v=weekly&loading=async&callback=__fvMapsReady';
+    s.async = true;
+    s.onerror = function () { mapsLoading = false; mapNote('Map could not load (no signal?). The Nearby list still works.'); };
+    document.head.appendChild(s);
+  }
+
+  function defineHtmlMarker() {
+    // A marker drawn with our own HTML, so trucks/trailers keep their
+    // labeled badges. No Google "Map ID" needed.
+    function M(pos, html, z, onClick) {
+      this.pos = pos; this.html = html;
+      this.div = document.createElement('div');
+      this.div.style.position = 'absolute';
+      this.div.style.zIndex = String(z);
+      this.div.style.cursor = 'pointer';
+      this.div.innerHTML = html;
+      var self = this;
+      this.div.addEventListener('click', function (e) { e.stopPropagation(); if (onClick) onClick(self); });
     }
-    S.map = L.map('map', { zoomControl: true }).setView(CFG.DEFAULT_CENTER, CFG.DEFAULT_ZOOM);
-    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-      maxZoom: 19,
-      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
-    }).addTo(S.map);
-    S.siteLayer = L.layerGroup().addTo(S.map);
-    S.layers = { trailers: L.layerGroup().addTo(S.map), trucks: L.layerGroup().addTo(S.map) };
+    M.prototype = Object.create(google.maps.OverlayView.prototype);
+    M.prototype.onAdd = function () { this.getPanes().overlayMouseTarget.appendChild(this.div); };
+    M.prototype.draw = function () {
+      var proj = this.getProjection();
+      if (!proj) return;
+      var p = proj.fromLatLngToDivPixel(this.pos);
+      if (!p) return;
+      this.div.style.left = p.x + 'px';
+      this.div.style.top = p.y + 'px';
+    };
+    M.prototype.onRemove = function () { if (this.div.parentNode) this.div.parentNode.removeChild(this.div); };
+    M.prototype.update = function (pos, html) {
+      this.pos = pos;
+      if (html !== this.html) { this.html = html; this.div.innerHTML = html; }
+      this.draw();
+    };
+    HtmlMarker = M;
+  }
+
+  function createMap() {
+    defineHtmlMarker();
+    $('map').innerHTML = '';
+    S.map = new google.maps.Map($('map'), {
+      center: { lat: CFG.DEFAULT_CENTER[0], lng: CFG.DEFAULT_CENTER[1] },
+      zoom: CFG.DEFAULT_ZOOM,
+      mapTypeControl: true,
+      mapTypeControlOptions: { mapTypeIds: ['roadmap', 'hybrid'], position: google.maps.ControlPosition.TOP_RIGHT },
+      streetViewControl: false,
+      fullscreenControl: false,
+      clickableIcons: false,
+      gestureHandling: 'greedy'     // one-finger pan on phones
+    });
+    S.info = new google.maps.InfoWindow({ pixelOffset: new google.maps.Size(0, -14) });
+    S.info.addListener('closeclick', function () { S.infoKey = null; });
+    S.map.addListener('click', function () { S.info.close(); S.infoKey = null; });
+    if (S.data) render();
+  }
+
+  function centerOn(lat, lng, zoom) {
+    if (!S.map) return;
+    S.map.setCenter({ lat: lat, lng: lng });
+    if (zoom != null) S.map.setZoom(zoom);
   }
 
   function drawSites() {
-    if (S.sitesDrawn || !S.data) return;
+    if (S.sitesDrawn || !S.data || !S.map) return;
+    var style = { strokeColor: '#7d1935', strokeWeight: 2, fillColor: '#7d1935', fillOpacity: 0.08, clickable: false, map: S.map };
     S.data.sites.forEach(function (s) {
       (s.shapes || []).forEach(function (sh) {
-        var style = { color: '#7d1935', weight: 2, fillOpacity: 0.08 };
         if (sh.type === 'polygon') {
-          L.polygon(sh.vertices.map(function (v) { return [v.latitude, v.longitude]; }), style).addTo(S.siteLayer);
+          new google.maps.Polygon(Object.assign({
+            paths: sh.vertices.map(function (v) { return { lat: v.latitude, lng: v.longitude }; })
+          }, style));
         } else if (sh.type === 'circle') {
-          L.circle([sh.center.latitude, sh.center.longitude], Object.assign({ radius: sh.radiusMeters }, style)).addTo(S.siteLayer);
+          new google.maps.Circle(Object.assign({
+            center: { lat: sh.center.latitude, lng: sh.center.longitude }, radius: sh.radiusMeters
+          }, style));
         }
       });
       if (s.center) {
-        L.marker([s.center.latitude, s.center.longitude], { opacity: 0, interactive: false })
-          .bindTooltip(esc(s.name), { permanent: true, direction: 'top', className: 'site-label', offset: [0, -4] })
-          .addTo(S.siteLayer);
+        var lbl = new HtmlMarker(new google.maps.LatLng(s.center.latitude, s.center.longitude),
+          '<div class="mk"><span class="site-label">' + esc(s.name) + '</span></div>', 1, null);
+        lbl.setMap(S.map);
       }
     });
     S.sitesDrawn = true;
   }
 
-  function truckIcon(t) {
+  function truckHtml(t) {
     var moving = t.speed > MOVING_MPH;
-    var html = '<div class="mk mk-truck' + (moving ? '' : ' idle') + '"><span class="mk-body">' +
+    return '<div class="mk mk-truck' + (moving ? '' : ' idle') + '"><span class="mk-body">' +
       (moving ? '<span class="arw" style="transform:rotate(' + Math.round(t.heading) + 'deg)"></span>' : '') +
       esc(shortLabel(t.name)) + '</span></div>';
-    return L.divIcon({ className: 'mk-wrap', html: html, iconSize: [0, 0] });
   }
-  function trailerIcon(r) {
+  function trailerHtml(r) {
     var age = ageMin(r.time);
     var old = age != null && age > staleLimit('trailer');
     var dot = r.load ? '<span class="dot ' + r.load.status + '"></span>' : '';
-    var html = '<div class="mk mk-trailer' + (old ? ' old' : '') + '"><span class="mk-body">' + dot + esc(shortLabel(r.name)) + '</span></div>';
-    return L.divIcon({ className: 'mk-wrap', html: html, iconSize: [0, 0] });
+    return '<div class="mk mk-trailer' + (old ? ' old' : '') + '"><span class="mk-body">' + dot + esc(shortLabel(r.name)) + '</span></div>';
   }
 
   function truckPopup(t, pulls) {
     var age = ageMin(t.time);
-    return '<div class="pop-name">Truck ' + esc(t.name) + '</div>' +
+    return '<div class="pop"><div class="pop-name">Truck ' + esc(t.name) + '</div>' +
       '<div class="pop-sub">' + esc(t.driver || 'No driver assigned') + '</div>' +
       '<div class="pop-sub">' + (t.speed > MOVING_MPH ? Math.round(t.speed) + ' mph' : 'Stopped') + (t.site ? ' · At ' + esc(t.site) : '') + '</div>' +
       (pulls && pulls.length ? '<div class="pop-sub">Likely pulling ' + pulls.map(function (r) { return esc(r.name) + (r.load ? ' (' + r.load.status + ')' : ''); }).join(', ') + '</div>' : '') +
-      '<div class="pop-meta">' + esc(t.address || '') + '<br>GPS ' + esc(agoText(age)) + '</div>';
+      '<div class="pop-meta">' + esc(t.address || '') + '<br>GPS ' + esc(agoText(age)) + '</div></div>';
   }
   function trailerPopup(r, tk) {
-    return '<div class="pop-name">Trailer ' + esc(r.name) + '</div>' +
+    return '<div class="pop"><div class="pop-name">Trailer ' + esc(r.name) + '</div>' +
       '<div class="pop-sub">' + (r.load ? esc(r.load.status.toUpperCase()) : 'Status not set') + (r.site ? ' · At ' + esc(r.site) : '') + '</div>' +
       (tk ? '<div class="pop-sub">Likely with truck ' + esc(tk.name) + (tk.driver ? ' · ' + esc(tk.driver) : '') + '</div>' : '') +
-      '<div class="pop-meta">' + esc(r.address || '') + '<br>GPS ' + esc(agoText(ageMin(r.time))) + '</div>';
+      '<div class="pop-meta">' + esc(r.address || '') + '<br>GPS ' + esc(agoText(ageMin(r.time))) + '</div></div>';
+  }
+
+  function openPopup(key) {
+    var m = S.markers[key];
+    if (!m || !S.info) return;
+    S.infoKey = key;
+    S.info.setContent(m.popup);
+    S.info.setPosition(m.pos);
+    S.info.open({ map: S.map });
   }
 
   function renderMap() {
-    if (!S.map) return;
+    if (!S.map || !HtmlMarker) return;
     drawSites();
     var seen = {};
     var tById = trucksById();
     var pulls = trailersByTruck();
 
-    function upsert(key, latlng, icon, popup, layer, z) {
+    function upsert(key, lat, lng, html, popup, z) {
       seen[key] = true;
+      var pos = new google.maps.LatLng(lat, lng);
       var m = S.markers[key];
       if (!m) {
-        m = L.marker(latlng, { icon: icon, zIndexOffset: z }).bindPopup(popup);
-        m.addTo(layer);
+        m = new HtmlMarker(pos, html, z, function () { openPopup(key); });
+        m.setMap(S.map);
         S.markers[key] = m;
       } else {
-        m.setLatLng(latlng); m.setIcon(icon); m.setPopupContent(popup);
-        if (!layer.hasLayer(m)) { S.layers.trucks.removeLayer(m); S.layers.trailers.removeLayer(m); m.addTo(layer); }
+        m.update(pos, html);
       }
+      m.popup = popup;
+      if (S.infoKey === key) { S.info.setContent(popup); S.info.setPosition(pos); }
     }
 
     if (S.filters.trailers) {
@@ -553,7 +632,7 @@
         if (S.filters.empty && !(r.load && r.load.status === 'empty')) return;
         var tk = r.pairedTruckId ? tById[r.pairedTruckId] : null;
         if (!matchesSearch(r, tk ? [tk.name, tk.driver] : [])) return;
-        upsert('r:' + r.id, [r.lat, r.lng], trailerIcon(r), trailerPopup(r, tk), S.layers.trailers, 0);
+        upsert('r:' + r.id, r.lat, r.lng, trailerHtml(r), trailerPopup(r, tk), 10);
       });
     }
     if (S.filters.trucks) {
@@ -561,42 +640,42 @@
         var trs = pulls[t.id] || [];
         if (S.filters.empty && !trs.some(function (r) { return r.load && r.load.status === 'empty'; })) return;
         if (!matchesSearch(t, trs.map(function (r) { return r.name; }))) return;
-        upsert('t:' + t.id, [t.lat, t.lng], truckIcon(t), truckPopup(t, trs), S.layers.trucks, 1000);
+        upsert('t:' + t.id, t.lat, t.lng, truckHtml(t), truckPopup(t, trs), 20);
       });
     }
 
     Object.keys(S.markers).forEach(function (k) {
       if (!seen[k]) {
-        S.layers.trucks.removeLayer(S.markers[k]);
-        S.layers.trailers.removeLayer(S.markers[k]);
+        S.markers[k].setMap(null);
         delete S.markers[k];
+        if (S.infoKey === k) { S.info.close(); S.infoKey = null; }
       }
     });
 
     if (!S.centeredOnce) {
       var site = currentSite();
-      if (site && site.center) S.map.setView([site.center.latitude, site.center.longitude], 11);
+      if (site && site.center) centerOn(site.center.latitude, site.center.longitude, 11);
       S.centeredOnce = true;
     }
   }
 
   function goTo(key) {
-    var m = S.markers[key];
-    if (!m) {
+    if (window.innerWidth < 900) setView('map');
+    if (!S.map) return;
+    if (!S.markers[key]) {
       // filtered off the map — turn everything back on and retry
       S.filters.trucks = S.filters.trailers = S.filters.dead = true; S.filters.empty = false;
       Array.prototype.forEach.call(document.querySelectorAll('.chip'), function (c) {
         c.classList.toggle('on', !!S.filters[c.getAttribute('data-filter')]);
       });
-      renderMap();
-      m = S.markers[key];
-      if (!m) return;
+      render();
+      if (!S.markers[key]) return;
     }
-    if (window.innerWidth < 900) setView('map');
+    var m = S.markers[key];
     setTimeout(function () {
-      S.map.invalidateSize();
-      S.map.setView(m.getLatLng(), Math.max(S.map.getZoom(), 14));
-      m.openPopup();
+      S.map.setCenter(m.pos);
+      if (S.map.getZoom() < 14) S.map.setZoom(14);
+      openPopup(key);
     }, 60);
   }
 
