@@ -80,6 +80,9 @@ On phones: open the URL → Share → **Add to Home Screen**.
 - **Phone:** the map fills the screen. Drag the panel at the bottom up for the list, or tap its handle. Tap any row to fly to it.
 - **PC:** the list sits in a panel on the left of the map.
 - **Tap a truck** to see its last 8 hours as a blue route, with each stop of 5+ minutes labeled with how long it sat. Tap the map to clear it.
+- **Fuel:** every truck shows its fuel level from Samsara, with a 7-day MPG figure when it has driven 25+ miles that week.
+  Amber under 25%, red under 15%. Low trucks get a fuel tag on their map badge, and the **Low fuel** button lists just those trucks.
+  MPG comes from Samsara's fuel & energy report (engine-computer fuel burned), refreshed every 6 hours.
 - **Inactive** button: trucks with no GPS or engine off for 60+ days, and trailers with no GPS for 30+ days, are hidden until you tap it.
   Parked trucks show how long they've sat ("Parked since Fri 5:42 PM").
 - Moving trucks glide between updates and show their speed on the badge: amber at 60+, red at 70+.

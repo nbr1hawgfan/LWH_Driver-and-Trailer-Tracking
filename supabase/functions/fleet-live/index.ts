@@ -278,16 +278,21 @@ async function buildLive(): Promise<any> {
       startTime: start.toISOString(), endTime: end.toISOString(), filterBy: "drivers",
     }).catch((e) => { console.log("assignments failed: " + e); return []; }),
     samsaraAll("/fleet/trailers/stats", { types: "gps", limit: "200" }),
-    // engine on/off and when it last changed: "off since August" = hasn't moved since August
-    samsaraAll("/fleet/vehicles/stats", { types: "engineStates" })
-      .catch((e) => { console.log("engine states failed: " + e); return []; }),
+    // engine on/off (and when it last changed) + fuel level, in one call
+    samsaraAll("/fleet/vehicles/stats", { types: "engineStates,fuelPercents" })
+      .catch((e) => { console.log("engine/fuel stats failed: " + e); return []; }),
   ]);
+  const mpgBy = await getMpg().catch((e) => { console.log("mpg failed: " + e); return {} as Record<string, any>; });
 
+  const latestOf = (x: any) => Array.isArray(x) ? x[x.length - 1] : x;
   const engineBy: Record<string, { value: string; since: string | null }> = {};
+  const fuelBy: Record<string, { pct: number; time: string | null }> = {};
   for (const v of engineRows) {
-    const e = v?.engineState ?? v?.engineStates;
-    const latest = Array.isArray(e) ? e[e.length - 1] : e;
-    if (v?.id && latest?.value) engineBy[String(v.id)] = { value: String(latest.value), since: latest.time || null };
+    if (!v?.id) continue;
+    const e = latestOf(v.engineState ?? v.engineStates);
+    if (e?.value) engineBy[String(v.id)] = { value: String(e.value), since: e.time || null };
+    const f = latestOf(v.fuelPercent ?? v.fuelPercents);
+    if (f && typeof f.value === "number") fuelBy[String(v.id)] = { pct: Math.round(f.value), time: f.time || null };
   }
 
   const driverBy = pickAssignments(assigns);
@@ -311,6 +316,10 @@ async function buildLive(): Promise<any> {
         site: siteFor(lat, lng, sites),
         engine: engineBy[String(v.id)]?.value ?? null,
         engineSince: engineBy[String(v.id)]?.since ?? null,
+        fuel: fuelBy[String(v.id)]?.pct ?? null,
+        fuelTime: fuelBy[String(v.id)]?.time ?? null,
+        mpg7: mpgBy[String(v.id)]?.mpg ?? null,
+        miles7: mpgBy[String(v.id)]?.miles ?? null,
       };
     });
 
@@ -400,6 +409,58 @@ async function getLive(): Promise<any> {
       .finally(() => { liveInflight = null; });
   }
   return await liveInflight;
+}
+
+// ---------------- 7-day MPG (Samsara fuel & energy report) ----------------
+// Built from the engine computer's fuel-burned figure, so no fuel card data is
+// needed. Pulled at most every 6 hours and shared through Postgres.
+const MPG_TTL_MS = 6 * 3600_000;
+const MPG_DAYS = 7;
+const MPG_MIN_MILES = 25;            // too few miles makes MPG meaningless
+let mpgMem: { at: number; body: Record<string, any> } | null = null;
+
+async function getMpg(): Promise<Record<string, any>> {
+  if (mpgMem && Date.now() - mpgMem.at < MPG_TTL_MS) return mpgMem.body;
+  const { data } = await sb.from("fleet_mpg_cache").select("body, built_at").eq("id", 1).maybeSingle();
+  if (data && Date.now() - Date.parse(data.built_at) < MPG_TTL_MS) {
+    mpgMem = { at: Date.parse(data.built_at), body: data.body };
+    return data.body;
+  }
+  // Out of date: hand back the old numbers now and refresh in the background,
+  // so a slow report never delays the live map.
+  const stale = data?.body ?? {};
+  const job = refreshMpg().catch((e) => console.log("mpg refresh failed: " + e));
+  // keep this instance alive until the report finishes, even after the reply is sent
+  (globalThis as any).EdgeRuntime?.waitUntil?.(job);
+  mpgMem = { at: Date.now() - MPG_TTL_MS + 5 * 60_000, body: stale };   // retry in ~5 min if this fails
+  return stale;
+}
+
+async function refreshMpg(): Promise<void> {
+  const end = new Date(), start = new Date(end.getTime() - MPG_DAYS * 86400_000);
+  const out: Record<string, any> = {};
+  let after: string | null = null;
+  for (let p = 0; p < 10; p++) {
+    const q: Record<string, string> = { startDate: start.toISOString(), endDate: end.toISOString() };
+    if (after) q.after = after;
+    const body = await samsaraGet("/fleet/reports/vehicles/fuel-energy", q);
+    const rows = body?.data?.vehicleReports ?? body?.vehicleReports ?? [];
+    for (const r of rows) {
+      const id = r?.vehicle?.id;
+      if (!id) continue;
+      const miles = (Number(r.distanceTraveledMeters) || 0) / 1609.344;
+      const gal = (Number(r.fuelConsumedMl) || 0) / 3785.41;
+      let mpg = miles >= MPG_MIN_MILES && gal > 0 ? miles / gal : null;
+      if (mpg == null && typeof r.efficiencyMpge === "number" && miles >= MPG_MIN_MILES) mpg = r.efficiencyMpge;
+      if (mpg != null && (mpg < 1 || mpg > 30)) mpg = null;    // sensor nonsense
+      out[String(id)] = { mpg: mpg == null ? null : Math.round(mpg * 10) / 10, miles: Math.round(miles) };
+    }
+    const pg = body?.pagination || {};
+    after = pg.hasNextPage && pg.endCursor ? pg.endCursor : null;
+    if (!after) break;
+  }
+  await sb.from("fleet_mpg_cache").upsert({ id: 1, body: out, built_at: new Date().toISOString() });
+  mpgMem = { at: Date.now(), body: out };
 }
 
 // ---------------- route trail for one truck (on tap) ----------------

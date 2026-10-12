@@ -19,5 +19,8 @@ window.FLEET_CONFIG = {
   //   trailers with no GPS for this many days
   DEAD_GPS_DAYS: 30,
   //   trucks with no GPS, or engine off, for this many days
-  TRUCK_INACTIVE_DAYS: 60
+  TRUCK_INACTIVE_DAYS: 60,
+  // Fuel colors, same cutoffs as Fleet Command: amber under LOW, red under CRITICAL
+  FUEL_LOW_PCT: 25,
+  FUEL_CRITICAL_PCT: 15
 };

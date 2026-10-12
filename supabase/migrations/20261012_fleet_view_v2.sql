@@ -31,3 +31,11 @@ insert into public.fleet_hidden (asset_type, match_type, value, note) values
   ('trailer','id','212014918337108','good gateway iii - test device'),
   ('trailer','id','281475002779527','Deactivated gateway record, not a trailer')
 on conflict do nothing;
+
+-- 7-day MPG per truck from Samsara's fuel & energy report, refreshed a few times a day
+create table if not exists public.fleet_mpg_cache (
+  id        int primary key default 1 check (id = 1),
+  body      jsonb not null,
+  built_at  timestamptz not null default now()
+);
+alter table public.fleet_mpg_cache enable row level security;

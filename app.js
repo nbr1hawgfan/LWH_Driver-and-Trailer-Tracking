@@ -23,7 +23,7 @@
     user: store('fv_user') || '',
     siteName: store('fv_site') || '',
     data: null, lastOk: 0, loading: false,
-    filters: { trucks: true, trailers: true, empty: false, dead: false, q: '' },
+    filters: { trucks: true, trailers: true, empty: false, dead: false, lowfuel: false, q: '' },
     map: null, markers: {}, sitesDrawn: false, centeredOnce: false, clusters: [], siteTags: {}, proj: null,
     info: null, infoKey: null, selKey: null,
     trail: null, trailInfo: {},
@@ -98,6 +98,24 @@
     return h + ' hr' + (m ? ' ' + m + ' min' : '');
   }
   function fmtStop(min) { return min < 60 ? min + ' min' : Math.floor(min / 60) + ' hr ' + (min % 60) + ' min'; }
+  // ---- fuel ----
+  var FUEL_ICON = '<svg class="fuel-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 3h9v18H5zM7 5v5h5V5zM15 8l3 3v7a1.5 1.5 0 0 0 3 0v-8l-3-3-1 1 2 2v2h-1z"/></svg>';
+  function fuelLevel(pct) {
+    if (pct == null) return '';
+    return pct < (CFG.FUEL_CRITICAL_PCT || 15) ? 'crit' : pct < (CFG.FUEL_LOW_PCT || 25) ? 'low' : 'ok';
+  }
+  function isLowFuel(t) { return t.fuel != null && t.fuel < (CFG.FUEL_LOW_PCT || 25) && !isInactiveTruck(t); }
+  function fuelRow(t) {
+    if (t.fuel == null && t.mpg7 == null) return '';
+    var lv = fuelLevel(t.fuel);
+    var h = '<div class="fuel">';
+    if (t.fuel != null) {
+      h += '<span class="fuel-pct ' + lv + '">' + FUEL_ICON + t.fuel + '%</span>' +
+        '<span class="fuel-bar" aria-hidden="true"><span class="' + lv + '" style="width:' + Math.max(3, Math.min(100, t.fuel)) + '%"></span></span>';
+    }
+    if (t.mpg7 != null) h += '<span class="mpg">' + t.mpg7.toFixed(1) + ' mpg, last 7 days</span>';
+    return h + '</div>';
+  }
   function speedClass(mph) { return mph >= 70 ? 'hi' : mph >= 60 ? 'mid' : ''; }
 
   var ICON_TRUCK = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2 6h11v9H2zM13 9h4l3 3.5V15h-7zM6 18.5a1.8 1.8 0 1 0 0-3.6 1.8 1.8 0 0 0 0 3.6zm11 0a1.8 1.8 0 1 0 0-3.6 1.8 1.8 0 0 0 0 3.6z"/></svg>';
@@ -348,6 +366,10 @@
     var chip = document.querySelector('.chip[data-filter="dead"]');
     chip.textContent = 'Inactive (' + deadN + ')';
     chip.hidden = deadN === 0;
+    var lowN = S.data.trucks.filter(isLowFuel).length;
+    var lchip = document.querySelector('.chip[data-filter="lowfuel"]');
+    lchip.textContent = 'Low fuel (' + lowN + ')';
+    lchip.hidden = lowN === 0 && !S.filters.lowfuel;
     renderList();
     renderMap();
   }
@@ -374,13 +396,14 @@
     if (!S.filters.trucks) return [];
     return S.data.trucks.filter(function (t) {
       if (!S.filters.dead && isInactiveTruck(t)) return false;
+      if (S.filters.lowfuel && !isLowFuel(t)) return false;
       var trs = pulls[t.id] || [];
       if (S.filters.empty && !trs.some(function (r) { return r.load && r.load.status === 'empty'; })) return false;
       return matchesSearch(t, trs.map(function (r) { return r.name; }));
     });
   }
   function visibleTrailers(tById) {
-    if (!S.filters.trailers) return [];
+    if (!S.filters.trailers || S.filters.lowfuel) return [];
     return S.data.trailers.filter(function (r) {
       if (!S.filters.dead && isDead(r)) return false;
       if (S.filters.empty && !(r.load && r.load.status === 'empty')) return false;
@@ -451,6 +474,7 @@
     h += '<div class="status ' + d.cls + '">' + esc(d.label) +
       (d.mph != null ? ', <span class="spd ' + speedClass(d.mph) + '">' + Math.round(d.mph) + ' mph</span>' : '') + '</div>';
 
+    if (i.kind === 'truck') h += fuelRow(a);
     if (i.kind === 'truck' && i.trailers.length) {
       h += '<div class="detail">Pulling ' + i.trailers.map(function (r) { return esc(r.name) + ' ' + loadBadge(r.load); }).join(', ') +
         ' <span class="likely">likely, from GPS</span></div>';
@@ -740,6 +764,7 @@
       (moving ? '<span class="arw" style="transform:rotate(' + Math.round(t.heading) + 'deg)"></span>' : '') +
       esc(shortLabel(t.name)) +
       (moving ? '<span class="spd ' + speedClass(t.speed) + '">' + Math.round(t.speed) + '</span>' : '') +
+      (isLowFuel(t) ? '<span class="mk-fuel ' + fuelLevel(t.fuel) + '">' + FUEL_ICON + t.fuel + '%</span>' : '') +
       tow + '</span></div>';
   }
   function trailerHtml(r, sel) {
@@ -767,6 +792,7 @@
           : (t.engine === 'Off' && t.engineSince ? 'Parked since ' + esc(sinceText(t.engineSince)) : 'Parked')) +
         (t.site ? ', at ' + esc(t.site) : '') + '</div>' +
       (pulls && pulls.length ? '<div class="pop-sub">Likely pulling ' + pulls.map(function (r) { return esc(r.name) + (r.load ? ' (' + r.load.status + ')' : ''); }).join(', ') + '</div>' : '') +
+      fuelRow(t) +
       '<div class="pop-meta">' + esc(t.address || '') + (t.address ? '<br>' : '') + 'GPS ' + esc(agoText(ageMin(t.time))) + '</div>' +
       svButton(t.lat, t.lng) + route + '</div>';
   }
