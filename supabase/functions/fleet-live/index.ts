@@ -163,7 +163,18 @@ async function db<T>(label: string, run: () => PromiseLike<{ data: T | null; err
   return res.data;
 }
 
+// A site can also be a plain circle drawn by us (center_lat/center_lng/radius_m),
+// for places that aren't a Samsara address, like the truck lot.
 async function shapesForSite(row: any): Promise<Shape[]> {
+  const manual: Shape[] = [];
+  if (typeof row.center_lat === "number" && typeof row.center_lng === "number" && Number(row.radius_m) > 0) {
+    manual.push({ type: "circle", center: { latitude: row.center_lat, longitude: row.center_lng }, radiusMeters: Number(row.radius_m) });
+  }
+  const fromSamsara = (row.samsara_address_ids ?? []).length ? await samsaraShapesForSite(row) : [];
+  return [...fromSamsara, ...manual];
+}
+
+async function samsaraShapesForSite(row: any): Promise<Shape[]> {
   const ids: string[] = (row.samsara_address_ids ?? []).map(String);
   const cache = row.geofence_cache;
   const fresh = row.geofence_cached_at && Date.now() - Date.parse(row.geofence_cached_at) < GEOFENCE_TTL_MS;

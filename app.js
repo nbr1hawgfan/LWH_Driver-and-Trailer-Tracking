@@ -12,6 +12,10 @@
   var ETA_MAX_MI = 150;      // no ETA beyond this
   var TRAIL_HOURS = 8;
   var GLIDE_MS = 2000;       // how long a truck takes to slide to its new position
+  var CLUSTER_PX = 48;       // markers closer than this on screen get grouped
+  var CLUSTER_MIN = 3;       // smallest group worth a bubble
+  var CLUSTER_BELOW_ZOOM = 18; // zoomed in this far, everything shows individually
+  var SITE_TAGS_FROM_ZOOM = 14; // site name tags show from this zoom in
   var PEEK_PX = 172;         // phone sheet "peek" height (matches styles.css)
 
   var S = {
@@ -20,7 +24,7 @@
     siteName: store('fv_site') || '',
     data: null, lastOk: 0, loading: false,
     filters: { trucks: true, trailers: true, empty: false, dead: false, q: '' },
-    map: null, markers: {}, sitesDrawn: false, centeredOnce: false,
+    map: null, markers: {}, sitesDrawn: false, centeredOnce: false, clusters: [], siteTags: {}, proj: null,
     info: null, infoKey: null, selKey: null,
     trail: null, trailInfo: {},
     pendingLoad: {}
@@ -620,10 +624,15 @@
     });
     S.info = new google.maps.InfoWindow({ pixelOffset: new google.maps.Size(0, -14) });
     S.info.addListener('closeclick', function () {
-      if (S.infoKey === 'stop') { S.infoKey = null; return; }   // keep the route showing
+      if (S.infoKey === 'stop' || S.infoKey === 'group') { S.infoKey = null; return; }   // keep the route showing
       deselect();
     });
     S.map.addListener('click', function () { S.info.close(); deselect(); });
+    // an invisible overlay just to read screen positions for grouping
+    S.proj = new google.maps.OverlayView();
+    S.proj.onAdd = function () {}; S.proj.draw = function () {}; S.proj.onRemove = function () {};
+    S.proj.setMap(S.map);
+    S.map.addListener('idle', recluster);
     if (S.data) render();
   }
 
@@ -684,8 +693,10 @@
           if (sh.type === 'polygon') sh.vertices.forEach(function (v) { top = Math.max(top, v.latitude); });
           else top = Math.max(top, sh.center.latitude + sh.radiusMeters / 111320);
         });
-        new HtmlMarker(new google.maps.LatLng(top, s.center.longitude),
-          '<div class="mk"><span class="site-tag">' + esc(s.name) + '</span></div>', 1, null).setMap(S.map);
+        var tag = new HtmlMarker(new google.maps.LatLng(top, s.center.longitude),
+          '<div class="mk"><span class="site-tag">' + esc(s.name) + '</span></div>', 1, null);
+        tag.setMap(S.map);
+        S.siteTags[s.name] = tag;
       }
     });
     S.sitesDrawn = true;
@@ -741,6 +752,7 @@
       var m = k && S.markers[k];
       if (m) m.setHtml(m.htmlFn());
     });
+    recluster();
   }
   function deselect() {
     S.infoKey = null;
@@ -779,7 +791,7 @@
     var tById = trucksById();
     var pulls = trailersByTruck();
 
-    function upsert(key, lat, lng, htmlFn, popupFn, z) {
+    function upsert(key, lat, lng, htmlFn, popupFn, z, meta) {
       seen[key] = true;
       var pos = new google.maps.LatLng(lat, lng);
       var m = S.markers[key];
@@ -793,6 +805,7 @@
         m.moveTo(pos);
       }
       m.popupFn = popupFn;
+      m.meta = meta || {};
       if (S.infoKey === key) { S.info.setContent(popupFn()); S.info.setPosition(pos); }
     }
 
@@ -803,13 +816,17 @@
       if (tk && truckShown[tk.id]) return;   // rides inside its truck's badge instead
       upsert(key, r.lat, r.lng,
         function () { return trailerHtml(r, S.selKey === key); },
-        function () { return trailerPopup(r, tk); }, 10);
+        function () { return trailerPopup(r, tk); }, 10,
+        { moving: r.speed > MOVING_MPH, site: r.site, addr: r.address, name: r.name,
+          label: displayName('trailer', r.name), sub: r.load ? (r.load.status === 'empty' ? 'Empty' : 'Loaded') : 'Status not set' });
     });
     visibleTrucks(pulls).forEach(function (t) {
       var key = 't:' + t.id, trs = pulls[t.id] || [];
       upsert(key, t.lat, t.lng,
         function () { return truckHtml(t, S.selKey === key, trs); },
-        function () { return truckPopup(t, trs); }, 20);
+        function () { return truckPopup(t, trs); }, 20,
+        { moving: t.speed > MOVING_MPH, site: t.site, addr: t.address, name: t.name,
+          label: displayName('truck', t.name), sub: t.driver || 'No driver assigned' });
       // keep the drawn route connected to the truck as it moves
       if (S.trail && S.trail.id === t.id && S.trail.line) {
         S.trail.line.forEach(function (pl) { pl.getPath().push(new google.maps.LatLng(t.lat, t.lng)); });
@@ -825,6 +842,100 @@
     });
 
     if (!S.centeredOnce) { S.centeredOnce = true; centerOnSite(); }
+    recluster();
+  }
+
+  // Tapping a bubble for one crowded lot lists what's there; tap a name to fly to it.
+  function showGroupList(label, keys, pos) {
+    var rows = keys.map(function (k) { return { k: k, m: S.markers[k] }; }).filter(function (x) { return x.m; });
+    rows.sort(function (a, b) {
+      if (a.k.charAt(0) !== b.k.charAt(0)) return a.k.charAt(0) === 't' ? -1 : 1;
+      return (a.m.meta.name || '').localeCompare(b.m.meta.name || '', undefined, { numeric: true });
+    });
+    var html = '<div class="pop"><div class="pop-name">' + esc(label) + '</div>' +
+      '<div class="pop-sub">' + rows.length + ' here. Tap one to see it.</div><div class="group-list">' +
+      rows.slice(0, 40).map(function (x) {
+        return '<button type="button" class="group-item" data-goto-key="' + esc(x.k) + '">' +
+          '<span class="gi-name">' + esc(x.m.meta.label || '') + '</span>' +
+          '<span class="gi-sub">' + esc(x.m.meta.sub || '') + '</span></button>';
+      }).join('') + '</div></div>';
+    S.infoKey = 'group';
+    S.info.setContent(html);
+    S.info.setPosition(pos);
+    S.info.open({ map: S.map });
+  }
+  document.addEventListener('click', function (e) {
+    var b = e.target.closest('[data-goto-key]');
+    if (b) goTo(b.getAttribute('data-goto-key'));
+  });
+
+  // ---------------- grouping crowded spots ----------------
+  // Zoomed out, parked trucks/trailers sitting close together on screen
+  // become one bubble ("Truck Yard: 9 trucks, 7 trailers"). Moving trucks
+  // and the selected marker always stay visible. Tap a bubble to zoom in.
+  function recluster() {
+    if (!S.map || !S.proj) return;
+    var proj = S.proj.getProjection();
+    if (!proj) return;
+    S.clusters.forEach(function (b) { b.setMap(null); });
+    S.clusters = [];
+    var keys = Object.keys(S.markers);
+    keys.forEach(function (k) { S.markers[k].div.style.display = ''; });
+    var showTags = S.map.getZoom() >= SITE_TAGS_FROM_ZOOM;
+    Object.keys(S.siteTags).forEach(function (n) { S.siteTags[n].div.style.display = showTags ? '' : 'none'; });
+    if (S.map.getZoom() >= CLUSTER_BELOW_ZOOM) return;
+
+    var groups = [];
+    keys.forEach(function (k) {
+      var m = S.markers[k];
+      if (k === S.selKey || (m.meta && m.meta.moving)) return;
+      var p = proj.fromLatLngToDivPixel(m.pos);
+      if (!p) return;
+      for (var i = 0; i < groups.length; i++) {
+        if (Math.abs(groups[i].x - p.x) <= CLUSTER_PX && Math.abs(groups[i].y - p.y) <= CLUSTER_PX) { groups[i].keys.push(k); return; }
+      }
+      groups.push({ x: p.x, y: p.y, keys: [k] });
+    });
+
+    groups.forEach(function (g) {
+      if (g.keys.length < CLUSTER_MIN) return;
+      var trucks = 0, trailers = 0, lat = 0, lng = 0, bySite = {}, addr = '';
+      var n = g.keys.length, minLat = 90, maxLat = -90, minLng = 180, maxLng = -180;
+      g.keys.forEach(function (k) {
+        var m = S.markers[k], la = m.pos.lat(), ln = m.pos.lng();
+        m.div.style.display = 'none';
+        if (k.charAt(0) === 't') trucks++; else trailers++;
+        lat += la; lng += ln;
+        minLat = Math.min(minLat, la); maxLat = Math.max(maxLat, la);
+        minLng = Math.min(minLng, ln); maxLng = Math.max(maxLng, ln);
+        if (m.meta.site) bySite[m.meta.site] = (bySite[m.meta.site] || 0) + 1;
+        if (!addr && m.meta.addr) addr = m.meta.addr;
+      });
+      // name the sites inside (up to two), else the street they're parked on
+      var sites = Object.keys(bySite).sort(function (a, b) { return bySite[b] - bySite[a]; });
+      var label = sites.length ? sites.slice(0, 2).join(' and ') + (sites.length > 2 ? ' area' : '')
+        : (addr ? addr.split(',')[0] : 'Parked together');
+      sites.forEach(function (sn) { if (S.siteTags[sn]) S.siteTags[sn].div.style.display = 'none'; });
+      var parts = [];
+      if (trucks) parts.push(trucks + (trucks === 1 ? ' truck' : ' trucks'));
+      if (trailers) parts.push(trailers + (trailers === 1 ? ' trailer' : ' trailers'));
+      var html = '<div class="mk"><span class="cluster" role="button" aria-label="' + esc(label + ', ' + parts.join(', ') + '. Tap to zoom in') + '">' +
+        '<b>' + n + '</b><span class="cl-text"><span class="cl-name">' + esc(label) + '</span><small>' + esc(parts.join(', ')) + '</small></span></span></div>';
+      var center = new google.maps.LatLng(lat / n, lng / n);
+      var members = g.keys.slice();
+      var bub = new HtmlMarker(center, html, 30, function () {
+        if (maxLat - minLat < 0.0015 && maxLng - minLng < 0.0015) {
+          showGroupList(label, members, center);       // all in one lot: list them instead of zooming forever
+        } else {
+          var b = new google.maps.LatLngBounds();
+          b.extend(new google.maps.LatLng(minLat, minLng));
+          b.extend(new google.maps.LatLng(maxLat, maxLng));
+          S.map.fitBounds(b, mapPadding());
+        }
+      });
+      bub.setMap(S.map);
+      S.clusters.push(bub);
+    });
   }
 
   function goTo(key) {

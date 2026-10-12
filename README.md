@@ -69,7 +69,9 @@ On phones: open the URL → Share → **Add to Home Screen**.
 ## Day-to-day
 
 - **Hide a trailer/truck:** `insert into fleet_hidden (asset_type, match_type, value, note) values ('trailer','id','<samsara id>','why');`
-- **Add a site:** `insert into fleet_sites (name, samsara_address_ids, is_home, sort_order) values ('New Dock', array['<address id>'], true, 40);`
+- **Add a site from Samsara:** `insert into fleet_sites (name, samsara_address_ids, is_home, sort_order) values ('New Dock', array['<address id>'], true, 40);`
+- **Add a site as a circle** (no Samsara address needed): `insert into fleet_sites (name, is_home, sort_order, center_lat, center_lng, radius_m) values ('Henryetta', false, 60, 35.449, -95.972, 300);`
+- **Rename a site:** `update fleet_sites set name = 'Main Yard' where name = 'Truck Yard';`
 - Changes show within 10 minutes (config cache). Redeploying the function applies them immediately.
 - **Change the PIN:** update the `FLEET_PIN` secret. Everyone gets sent back to sign-in.
 - **Who set a trailer empty/loaded:** `select * from fleet_trailer_load_log order by updated_at desc;`
@@ -81,6 +83,9 @@ On phones: open the URL → Share → **Add to Home Screen**.
 - Moving trucks glide between updates and show their speed on the badge: amber at 60+, red at 70+.
 - A trailer that's being pulled rides inside its truck's badge instead of getting its own marker.
 - Round buttons on the right: satellite view, back to my site, show everything.
+- **Crowded spots group up** when zoomed out: one bubble per yard or lot, like "Truck Yard: 9 trucks, 7 trailers"
+  (or the street name for unlisted lots, like "8201 Chad Colley Boulevard"). Tap to zoom in. For a single packed lot,
+  tapping lists everything there; tap a name to fly to it. Moving trucks are never grouped.
 
 ## How the "smart" parts work
 
@@ -99,8 +104,8 @@ On phones: open the URL → Share → **Add to Home Screen**.
 | `config.js` | function URL, Google Maps key, refresh rate (30s), stale-GPS cutoffs (trucks 2 hr, trailers 24 hr), dead-GPS days (30) |
 | `sw.js` | offline app shell; bump `VERSION` on each release |
 | `supabase/functions/fleet-live/index.ts` | the Samsara proxy |
-| `supabase/migrations/…sql` | tables + seed data |
+| `supabase/migrations/…sql` | tables + seed data (v1 and v2, both already applied) |
 
 ## Phase 2 ideas
 Routed ETAs (OpenRouteService), per-person PINs, share Load Status with the Pernod Dwell Tracker,
-trailer dwell timers ("at Pernod 3 days"), grouping crowded yards into one count bubble when zoomed out.
+trailer dwell timers ("at Pernod 3 days").

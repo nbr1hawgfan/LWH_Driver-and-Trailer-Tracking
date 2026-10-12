@@ -1,6 +1,6 @@
 // LWH Fleet View service worker — caches the app shell only.
 // Live fleet data and map tiles always go to the network.
-const VERSION = 'fleetview-v1.2.0';
+const VERSION = 'fleetview-v1.3.0';
 const SHELL = [
   './', './index.html', './styles.css', './app.js', './config.js', './manifest.json',
   './icons/icon-192.png', './icons/icon-512.png'
