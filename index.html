@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>LWH Fleet View</title>
+  <meta name="theme-color" content="#7d1935">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Fleet View">
+  <link rel="manifest" href="manifest.json">
+  <link rel="icon" type="image/png" href="icons/icon-192.png">
+  <link rel="apple-touch-icon" href="icons/icon-192.png">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+  <!-- ===== Sign-in ===== -->
+  <section id="login" class="login" hidden>
+    <div class="login-card">
+      <div class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></div>
+      <h1>Fleet View</h1>
+      <p class="muted">Logistics Warehouse — live trucks and trailers</p>
+      <form id="loginForm" autocomplete="off">
+        <label for="loginName">Your name</label>
+        <input id="loginName" type="text" maxlength="40" required placeholder="First and last name">
+        <label for="loginPin">Team PIN</label>
+        <input id="loginPin" type="password" inputmode="numeric" maxlength="12" required>
+        <button type="submit" class="btn-primary" id="loginBtn">Sign in</button>
+        <p id="loginErr" class="err" role="alert"></p>
+      </form>
+    </div>
+  </section>
+
+  <!-- ===== App ===== -->
+  <div id="app" class="app" hidden>
+    <header class="topbar">
+      <div class="tb-row">
+        <div class="tb-title">
+          <div class="brand-mark sm" aria-hidden="true"><span></span><span></span><span></span></div>
+          <span>Fleet View</span>
+        </div>
+        <div class="tb-site">
+          <label for="sitePick">I'm at</label>
+          <select id="sitePick"></select>
+        </div>
+      </div>
+      <div class="tb-row tb-sub">
+        <span id="updated" class="updated">Loading…</span>
+        <button id="refreshBtn" class="link-btn" type="button">Refresh</button>
+        <button id="menuBtn" class="link-btn" type="button">Sign out</button>
+      </div>
+      <nav class="tabs" role="tablist">
+        <button role="tab" data-view="list" class="tab active" type="button">Nearby</button>
+        <button role="tab" data-view="map" class="tab" type="button">Map</button>
+      </nav>
+    </header>
+
+    <div id="banner" class="banner" hidden></div>
+
+    <main class="main">
+      <section id="listPane" class="pane list-pane">
+        <div class="filters">
+          <input id="search" type="search" placeholder="Search truck, trailer, or driver">
+          <div class="chips" role="group" aria-label="Show">
+            <button class="chip on" data-filter="trucks" type="button">Trucks</button>
+            <button class="chip on" data-filter="trailers" type="button">Trailers</button>
+            <button class="chip" data-filter="empty" type="button">Empty only</button>
+          </div>
+        </div>
+        <div id="list" class="list"></div>
+      </section>
+
+      <section id="mapPane" class="pane map-pane">
+        <div id="map"></div>
+        <div class="legend">
+          <span><i class="lg lg-truck"></i>Truck</span>
+          <span><i class="lg lg-trailer"></i>Trailer</span>
+          <span><i class="lg lg-empty"></i>Empty</span>
+          <span><i class="lg lg-loaded"></i>Loaded</span>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+  <script src="config.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

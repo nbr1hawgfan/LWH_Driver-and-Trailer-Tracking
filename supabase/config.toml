@@ -1,0 +1,5 @@
+project_id = "tjivcqxnkftujceumdtx"
+
+# The team PIN is the gate for this function, so Supabase JWT checks are off.
+[functions.fleet-live]
+verify_jwt = false

@@ -1,0 +1,16 @@
+{
+  "name": "LWH Fleet View",
+  "short_name": "Fleet View",
+  "description": "Live truck, driver and trailer positions for Logistics Warehouse managers.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#f4f4f6",
+  "theme_color": "#7d1935",
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "icons/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}
