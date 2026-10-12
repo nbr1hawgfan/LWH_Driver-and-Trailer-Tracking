@@ -74,6 +74,14 @@ On phones: open the URL → Share → **Add to Home Screen**.
 - **Change the PIN:** update the `FLEET_PIN` secret. Everyone gets sent back to sign-in.
 - **Who set a trailer empty/loaded:** `select * from fleet_trailer_load_log order by updated_at desc;`
 
+## Using it
+- **Phone:** the map fills the screen. Drag the panel at the bottom up for the list, or tap its handle. Tap any row to fly to it.
+- **PC:** the list sits in a panel on the left of the map.
+- **Tap a truck** to see its last 8 hours as a blue route, with each stop of 5+ minutes labeled with how long it sat. Tap the map to clear it.
+- Moving trucks glide between updates and show their speed on the badge: amber at 60+, red at 70+.
+- A trailer that's being pulled rides inside its truck's badge instead of getting its own marker.
+- Round buttons on the right: satellite view, back to my site, show everything.
+
 ## How the "smart" parts work
 
 - **At a site:** GPS point inside the Samsara geofence (polygon or circle), same math as the Dwell Tracker.
@@ -95,4 +103,4 @@ On phones: open the URL → Share → **Add to Home Screen**.
 
 ## Phase 2 ideas
 Routed ETAs (OpenRouteService), per-person PINs, share Load Status with the Pernod Dwell Tracker,
-trailer dwell timers ("at Pernod 3 days").
+trailer dwell timers ("at Pernod 3 days"), grouping crowded yards into one count bubble when zoomed out.

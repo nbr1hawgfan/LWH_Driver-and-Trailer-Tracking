@@ -4,84 +4,86 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>LWH Fleet View</title>
-  <meta name="theme-color" content="#7d1935">
+  <meta name="theme-color" content="#ffffff">
   <meta name="apple-mobile-web-app-capable" content="yes">
-  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
   <meta name="apple-mobile-web-app-title" content="Fleet View">
   <link rel="manifest" href="manifest.json">
   <link rel="icon" type="image/png" href="icons/icon-192.png">
   <link rel="apple-touch-icon" href="icons/icon-192.png">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&display=swap">
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
 
   <!-- ===== Sign-in ===== -->
   <section id="login" class="login" hidden>
-    <div class="login-card">
-      <div class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></div>
+    <form id="loginForm" class="login-card" autocomplete="off">
+      <div class="brand-mark lg" aria-hidden="true"><span></span><span></span><span></span></div>
       <h1>Fleet View</h1>
-      <p class="muted">Logistics Warehouse — live trucks and trailers</p>
-      <form id="loginForm" autocomplete="off">
-        <label for="loginName">Your name</label>
-        <input id="loginName" type="text" maxlength="40" required placeholder="First and last name">
-        <label for="loginPin">Team PIN</label>
-        <input id="loginPin" type="password" inputmode="numeric" maxlength="12" required>
-        <button type="submit" class="btn-primary" id="loginBtn">Sign in</button>
-        <p id="loginErr" class="err" role="alert"></p>
-      </form>
-    </div>
+      <p class="muted">Live trucks and trailers for Logistics Warehouse managers.</p>
+      <label for="loginName">Your name</label>
+      <input id="loginName" type="text" maxlength="40" required autocomplete="name">
+      <label for="loginPin">Team PIN</label>
+      <input id="loginPin" type="password" inputmode="numeric" maxlength="12" required>
+      <button type="submit" class="btn-primary" id="loginBtn">Sign in</button>
+      <p id="loginErr" class="err" role="alert"></p>
+    </form>
   </section>
 
   <!-- ===== App ===== -->
   <div id="app" class="app" hidden>
-    <header class="topbar">
-      <div class="tb-row">
-        <div class="tb-title">
-          <div class="brand-mark sm" aria-hidden="true"><span></span><span></span><span></span></div>
-          <span>Fleet View</span>
-        </div>
-        <div class="tb-site">
-          <label for="sitePick">I'm at</label>
+    <div id="map" aria-label="Map of trucks and trailers"></div>
+
+    <!-- Floating search -->
+    <div class="searchbar" role="search">
+      <div class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></div>
+      <input id="search" type="search" placeholder="Search trucks, trailers, drivers" aria-label="Search trucks, trailers, drivers">
+      <button id="menuBtn" class="icon-btn" type="button" aria-label="Menu" aria-expanded="false">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="5" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="12" cy="19" r="2"/></svg>
+      </button>
+      <div id="menu" class="menu" hidden>
+        <div class="menu-who" id="menuWho"></div>
+        <button type="button" data-menu="refresh">Refresh now</button>
+        <button type="button" data-menu="signout">Sign out</button>
+      </div>
+    </div>
+
+    <!-- Map buttons -->
+    <div class="map-btns">
+      <button class="map-btn" id="layerBtn" type="button" aria-label="Switch to satellite" title="Satellite">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 2 8.5 12 14l10-5.5L12 3Z"/><path d="m2 13.5 10 5.5 10-5.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg>
+      </button>
+      <button class="map-btn" id="siteBtn" type="button" aria-label="Center on my site" title="My site">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 10.5 12 4l8 6.5V20h-5.5v-5.5h-5V20H4z"/></svg>
+      </button>
+      <button class="map-btn" id="fitBtn" type="button" aria-label="Show everything" title="Show everything">
+        <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg>
+      </button>
+    </div>
+
+    <div id="toast" class="toast" role="status" hidden></div>
+
+    <!-- List panel: side panel on PC, pull-up sheet on phone -->
+    <section id="sheet" class="sheet" data-state="peek" aria-label="Trucks and trailers">
+      <div class="sheet-head" id="sheetHead">
+        <div class="grabber" aria-hidden="true"></div>
+        <div class="site-row">
+          <label for="sitePick" class="site-label">I'm at</label>
           <select id="sitePick"></select>
+          <span id="updated" class="updated">Loading</span>
+        </div>
+        <div class="chips" role="group" aria-label="Show">
+          <button class="chip on" data-filter="trucks" type="button">Trucks</button>
+          <button class="chip on" data-filter="trailers" type="button">Trailers</button>
+          <button class="chip" data-filter="empty" type="button">Empty only</button>
+          <button class="chip" data-filter="dead" type="button" hidden>No GPS 30d+</button>
         </div>
       </div>
-      <div class="tb-row tb-sub">
-        <span id="updated" class="updated">Loading…</span>
-        <button id="refreshBtn" class="link-btn" type="button">Refresh</button>
-        <button id="menuBtn" class="link-btn" type="button">Sign out</button>
-      </div>
-      <nav class="tabs" role="tablist">
-        <button role="tab" data-view="list" class="tab active" type="button">Nearby</button>
-        <button role="tab" data-view="map" class="tab" type="button">Map</button>
-      </nav>
-    </header>
-
-    <div id="banner" class="banner" hidden></div>
-
-    <main class="main">
-      <section id="listPane" class="pane list-pane">
-        <div class="filters">
-          <input id="search" type="search" placeholder="Search truck, trailer, or driver">
-          <div class="chips" role="group" aria-label="Show">
-            <button class="chip on" data-filter="trucks" type="button">Trucks</button>
-            <button class="chip on" data-filter="trailers" type="button">Trailers</button>
-            <button class="chip" data-filter="empty" type="button">Empty only</button>
-            <button class="chip" data-filter="dead" type="button" hidden>No GPS 30d+</button>
-          </div>
-        </div>
-        <div id="list" class="list"></div>
-      </section>
-
-      <section id="mapPane" class="pane map-pane">
-        <div id="map"></div>
-        <div class="legend">
-          <span><i class="lg lg-truck"></i>Truck</span>
-          <span><i class="lg lg-trailer"></i>Trailer</span>
-          <span><i class="lg lg-empty"></i>Empty</span>
-          <span><i class="lg lg-loaded"></i>Loaded</span>
-        </div>
-      </section>
-    </main>
+      <div id="list" class="list"></div>
+    </section>
   </div>
 
   <script src="config.js"></script>

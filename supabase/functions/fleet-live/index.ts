@@ -379,6 +379,81 @@ async function getLive(): Promise<any> {
   return await liveInflight;
 }
 
+// ---------------- route trail for one truck (on tap) ----------------
+// Ported from detectStops() in the Fleet Command GAS project.
+const STOP_MPH = 2;                  // slower than this counts as stopped
+const STOP_MIN_MS = 5 * 60_000;      // stops shorter than 5 min are ignored
+const STOP_DRIFT_MI = 0.05;          // GPS wobble allowed while parked
+const TRAIL_MAX_POINTS = 600;        // keep the payload small for phones
+const trailCache: Record<string, { at: number; body: any }> = {};
+
+async function buildTrail(vehicleId: string, hours: number): Promise<any> {
+  const key = vehicleId + ":" + hours;
+  const hit = trailCache[key];
+  if (hit && Date.now() - hit.at < 60_000) return hit.body;
+
+  const end = new Date(), start = new Date(end.getTime() - hours * 3600_000);
+  const rows = await samsaraAll("/fleet/vehicles/stats/history", {
+    startTime: start.toISOString(), endTime: end.toISOString(), types: "gps", vehicleIds: vehicleId,
+  });
+  // A long history comes back across several pages, with the same truck
+  // repeated on each page — merge them all.
+  const raw: any[] = [];
+  for (const r of rows) if (String(r.id) === vehicleId && Array.isArray(r.gps)) raw.push(...r.gps);
+
+  const pts = raw
+    .filter((p) => typeof p.latitude === "number" && typeof p.longitude === "number" && p.time)
+    .map((p) => ({ lat: p.latitude, lng: p.longitude, t: Date.parse(p.time), mph: Number(p.speedMilesPerHour ?? 0) || 0,
+                   addr: p.reverseGeo?.formattedLocation || "" }))
+    .sort((a, b) => a.t - b.t);
+
+  // stops
+  const stops: any[] = [];
+  let cur: any = null;
+  const closeStop = () => {
+    if (cur && cur.end - cur.start >= STOP_MIN_MS) {
+      stops.push({ lat: cur.lat, lng: cur.lng, start: new Date(cur.start).toISOString(),
+                   end: new Date(cur.end).toISOString(), minutes: Math.round((cur.end - cur.start) / 60000), address: cur.addr });
+    }
+    cur = null;
+  };
+  for (const p of pts) {
+    if (p.mph < STOP_MPH) {
+      if (cur && miles(cur.lat, cur.lng, p.lat, p.lng) < STOP_DRIFT_MI) {
+        cur.end = p.t; cur.n++;
+        cur.lat += (p.lat - cur.lat) / cur.n; cur.lng += (p.lng - cur.lng) / cur.n;
+        if (!cur.addr && p.addr) cur.addr = p.addr;
+      } else {
+        closeStop();
+        cur = { lat: p.lat, lng: p.lng, start: p.t, end: p.t, n: 1, addr: p.addr };
+      }
+    } else {
+      closeStop();
+    }
+  }
+  closeStop();
+
+  let total = 0;
+  for (let i = 1; i < pts.length; i++) total += miles(pts[i - 1].lat, pts[i - 1].lng, pts[i].lat, pts[i].lng);
+
+  // thin the line for the phone, always keeping first and last point
+  let line = pts;
+  if (pts.length > TRAIL_MAX_POINTS) {
+    const step = Math.ceil(pts.length / TRAIL_MAX_POINTS);
+    line = pts.filter((_, i) => i % step === 0 || i === pts.length - 1);
+  }
+
+  const body = {
+    ok: true, vehicleId, hours,
+    points: line.map((p) => [Math.round(p.lat * 1e6) / 1e6, Math.round(p.lng * 1e6) / 1e6]),
+    stops,
+    miles: Math.round(total * 10) / 10,
+    from: pts.length ? new Date(pts[0].t).toISOString() : null,
+  };
+  trailCache[key] = { at: Date.now(), body };
+  return body;
+}
+
 async function loadStatuses(): Promise<Record<string, any>> {
   const rows = await db<any[]>("fleet_trailer_load", () => sb.from("fleet_trailer_load").select("*"));
   const out: Record<string, any> = {};
@@ -414,6 +489,13 @@ Deno.serve(async (req) => {
         ...live,
         trailers: live.trailers.map((t: any) => ({ ...t, load: loads[t.id] || null })),
       });
+    }
+
+    if (action === "trail") {
+      const id = String(body.vehicleId || "").trim();
+      if (!/^\d{1,20}$/.test(id)) return json({ ok: false, error: "vehicleId required" }, 400);
+      const hours = Math.min(Math.max(Number(body.hours) || 8, 1), 12);
+      return json(await buildTrail(id, hours));
     }
 
     if (action === "setLoad") {

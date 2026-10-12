@@ -1,5 +1,5 @@
 /* ============================================================
-   LWH Fleet View — client
+   LWH Fleet View — client (v1.2, Google Maps layout)
    Talks only to the fleet-live edge function. No Samsara token here.
    ============================================================ */
 (function () {
@@ -9,43 +9,39 @@
   var MOVING_MPH = 5;
   var APPROACH_DEG = 50;     // heading within this of the bearing to your site = "headed your way"
   var ROAD_FACTOR = 1.25;    // straight-line miles -> rough road miles
-  var ETA_MAX_MI = 150;      // don't show ETAs for trucks farther than this
+  var ETA_MAX_MI = 150;      // no ETA beyond this
+  var TRAIL_HOURS = 8;
+  var GLIDE_MS = 2000;       // how long a truck takes to slide to its new position
+  var PEEK_PX = 172;         // phone sheet "peek" height (matches styles.css)
 
-  // ---------------- state ----------------
   var S = {
     pin: store('fv_pin') || '',
     user: store('fv_user') || '',
     siteName: store('fv_site') || '',
-    view: 'list',
-    data: null,
-    lastOk: 0,
-    loading: false,
+    data: null, lastOk: 0, loading: false,
     filters: { trucks: true, trailers: true, empty: false, dead: false, q: '' },
-    map: null,
-    markers: {},       // key "t:<id>" / "r:<id>" -> marker
-    info: null,
-    infoKey: null,
-    sitesDrawn: false,
-    centeredOnce: false,
-    pendingLoad: {}    // trailerId -> status while saving
+    map: null, markers: {}, sitesDrawn: false, centeredOnce: false,
+    info: null, infoKey: null, selKey: null,
+    trail: null, trailInfo: {},
+    pendingLoad: {}
   };
 
-  // ---------------- storage (never trust it to exist) ----------------
+  // ---------------- small helpers ----------------
   function store(k, v) {
     try {
       if (v === undefined) return localStorage.getItem(k);
       if (v === null) localStorage.removeItem(k); else localStorage.setItem(k, v);
-    } catch (e) { /* private mode etc. */ }
+    } catch (e) { /* private mode */ }
     return null;
   }
-
-  // ---------------- helpers ----------------
   function $(id) { return document.getElementById(id); }
   function esc(s) {
     return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
       return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
     });
   }
+  function isDesktop() { return window.matchMedia('(min-width: 900px)').matches; }
+  var reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
   function rad(d) { return d * Math.PI / 180; }
   function milesBetween(a, b, c, d) {
     var dLat = rad(c - a), dLng = rad(d - b);
@@ -76,18 +72,32 @@
     var d = Math.floor(h / 24);
     return d + (d === 1 ? ' day ago' : ' days ago');
   }
+  function clock(iso) {
+    var d = new Date(iso);
+    return isNaN(d) ? '' : d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  }
   function shortLabel(name) {
     var m = String(name || '').match(/^\s*(\d+)/);
     if (m) return m[1];
     var s = String(name || '').trim();
     return s.length > 8 ? s.slice(0, 8) : s;
   }
+  // "1700" -> "Truck 1700", but "Dodge Shop Truck" stays as is
+  function displayName(kind, name) {
+    var n = String(name || '').trim();
+    return /^\d/.test(n) ? (kind === 'truck' ? 'Truck ' : 'Trailer ') + n : n;
+  }
   function fmtMi(mi) { return mi < 10 ? mi.toFixed(1) : String(Math.round(mi)); }
   function fmtEta(min) {
     if (min < 60) return min + ' min';
     var h = Math.floor(min / 60), m = min % 60;
-    return h + ' hr' + (m ? ' ' + m : '');
+    return h + ' hr' + (m ? ' ' + m + ' min' : '');
   }
+  function fmtStop(min) { return min < 60 ? min + ' min' : Math.floor(min / 60) + ' hr ' + (min % 60) + ' min'; }
+  function speedClass(mph) { return mph >= 70 ? 'hi' : mph >= 60 ? 'mid' : ''; }
+
+  var ICON_TRUCK = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2 6h11v9H2zM13 9h4l3 3.5V15h-7zM6 18.5a1.8 1.8 0 1 0 0-3.6 1.8 1.8 0 0 0 0 3.6zm11 0a1.8 1.8 0 1 0 0-3.6 1.8 1.8 0 0 0 0 3.6z"/></svg>';
+  var ICON_TRAILER = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2 6h17v9H2zM19 12h3v1.5h-3zM6 18.5a1.8 1.8 0 1 0 0-3.6 1.8 1.8 0 0 0 0 3.6zm5 0a1.8 1.8 0 1 0 0-3.6 1.8 1.8 0 0 0 0 3.6z"/></svg>';
 
   // ---------------- API ----------------
   function api(action, extra, pinOverride) {
@@ -102,7 +112,7 @@
     });
   }
 
-  // ---------------- login ----------------
+  // ---------------- sign in ----------------
   function showLogin(msg) {
     $('app').hidden = true;
     $('login').hidden = false;
@@ -117,7 +127,7 @@
     var pin = $('loginPin').value.trim();
     if (!name || !pin) return;
     var btn = $('loginBtn');
-    btn.disabled = true; btn.textContent = 'Checking…';
+    btn.disabled = true; btn.textContent = 'Checking';
     $('loginErr').textContent = '';
     api('ping', null, pin).then(function (j) {
       if (j.ok) {
@@ -135,19 +145,34 @@
     });
   });
 
-  $('menuBtn').addEventListener('click', function () {
-    if (!confirm('Sign out of Fleet View on this device?')) return;
-    S.pin = ''; store('fv_pin', null);
-    showLogin('');
+  // ---------------- menu ----------------
+  function closeMenu() { $('menu').hidden = true; $('menuBtn').setAttribute('aria-expanded', 'false'); }
+  $('menuBtn').addEventListener('click', function (e) {
+    e.stopPropagation();
+    var open = $('menu').hidden;
+    $('menuWho').textContent = 'Signed in as ' + (S.user || '');
+    $('menu').hidden = !open;
+    $('menuBtn').setAttribute('aria-expanded', String(open));
+  });
+  document.addEventListener('click', function (e) { if (!e.target.closest('.menu')) closeMenu(); });
+  $('menu').addEventListener('click', function (e) {
+    var b = e.target.closest('button');
+    if (!b) return;
+    closeMenu();
+    if (b.getAttribute('data-menu') === 'refresh') refresh(true);
+    if (b.getAttribute('data-menu') === 'signout') {
+      if (!confirm('Sign out of Fleet View on this device?')) return;
+      S.pin = ''; store('fv_pin', null);
+      showLogin('');
+    }
   });
 
-  // ---------------- app start ----------------
+  // ---------------- start ----------------
   var timers = { refresh: null, tick: null };
 
   function startApp() {
     $('login').hidden = true;
     $('app').hidden = false;
-    setView(S.view);
     initMap();
     refresh();
     clearInterval(timers.refresh); clearInterval(timers.tick);
@@ -161,70 +186,40 @@
     if (document.visibilityState === 'visible' && S.pin && Date.now() - S.lastOk > 15000) refresh();
   });
 
-  $('refreshBtn').addEventListener('click', function () { refresh(true); });
-
-  // ---------------- tabs / view ----------------
-  function setView(v) {
-    S.view = v;
-    document.body.classList.toggle('view-map', v === 'map');
-    Array.prototype.forEach.call(document.querySelectorAll('.tab'), function (t) {
-      t.classList.toggle('active', t.getAttribute('data-view') === v);
-    });
+  // ---------------- toast ----------------
+  var toastTimer = null;
+  function toast(msg, ms) {
+    var t = $('toast');
+    t.textContent = msg; t.hidden = false;
+    clearTimeout(toastTimer);
+    if (ms) toastTimer = setTimeout(function () { t.hidden = true; }, ms);
   }
-  Array.prototype.forEach.call(document.querySelectorAll('.tab'), function (t) {
-    t.addEventListener('click', function () { setView(t.getAttribute('data-view')); });
-  });
-
-  // ---------------- filters ----------------
-  Array.prototype.forEach.call(document.querySelectorAll('.chip'), function (c) {
-    c.addEventListener('click', function () {
-      var f = c.getAttribute('data-filter');
-      S.filters[f] = !S.filters[f];
-      c.classList.toggle('on', S.filters[f]);
-      render();
-    });
-  });
-  var searchTimer = null;
-  $('search').addEventListener('input', function (e) {
-    clearTimeout(searchTimer);
-    searchTimer = setTimeout(function () { S.filters.q = e.target.value.trim().toLowerCase(); render(); }, 150);
-  });
-
-  $('sitePick').addEventListener('change', function (e) {
-    S.siteName = e.target.value;
-    store('fv_site', S.siteName);
-    render();
-    var site = currentSite();
-    if (site && site.center) centerOn(site.center.latitude, site.center.longitude, 11);
-  });
+  function hideToast() { $('toast').hidden = true; }
 
   // ---------------- data ----------------
   function refresh(manual) {
     if (S.loading) return;
     S.loading = true;
-    if (manual) $('updated').textContent = 'Refreshing…';
+    if (manual) $('updated').textContent = 'Refreshing';
     api('live').then(function (j) {
-      if (j._status === 401) { S.pin = ''; store('fv_pin', null); showLogin('PIN changed. Sign in again.'); return; }
-      if (!j.ok) { showBanner('Could not load fleet data: ' + (j.error || 'unknown error') + '. Showing last good data.'); return; }
+      if (j._status === 401) { S.pin = ''; store('fv_pin', null); showLogin('The PIN changed. Sign in again.'); return; }
+      if (!j.ok) { toast('Fleet data did not load: ' + (j.error || 'unknown error') + '. Showing the last good data.'); return; }
       S.data = j;
       S.lastOk = Date.now();
-      hideBanner();
+      hideToast();
       fillSitePicker();
       render();
     }).catch(function () {
-      showBanner('No connection. Showing last good data — it will update when signal returns.');
+      toast('No connection. Showing the last good data until signal returns.');
     }).then(function () {
       S.loading = false;
       updateClock();
     });
   }
 
-  function showBanner(t) { var b = $('banner'); b.textContent = t; b.hidden = false; }
-  function hideBanner() { $('banner').hidden = true; }
-
   function updateClock() {
     var el = $('updated');
-    if (!S.lastOk) { if (!S.loading) el.textContent = 'Not loaded yet'; return; }
+    if (!S.lastOk) { if (!S.loading) el.textContent = 'Not loaded'; return; }
     var s = Math.round((Date.now() - S.lastOk) / 1000);
     el.textContent = 'Updated ' + (s < 5 ? 'just now' : s < 60 ? s + 's ago' : Math.round(s / 60) + ' min ago');
     el.classList.toggle('stale', s > 120);
@@ -251,7 +246,33 @@
     return null;
   }
 
-  // ---------------- classify an asset relative to your site ----------------
+  $('sitePick').addEventListener('change', function (e) {
+    S.siteName = e.target.value;
+    store('fv_site', S.siteName);
+    render();
+    centerOnSite();
+  });
+
+  // ---------------- filters ----------------
+  Array.prototype.forEach.call(document.querySelectorAll('.chip'), function (c) {
+    c.addEventListener('click', function () {
+      var f = c.getAttribute('data-filter');
+      S.filters[f] = !S.filters[f];
+      c.classList.toggle('on', S.filters[f]);
+      render();
+    });
+  });
+  var searchTimer = null;
+  $('search').addEventListener('input', function (e) {
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(function () {
+      S.filters.q = e.target.value.trim().toLowerCase();
+      render();
+      if (S.filters.q && !isDesktop() && sheetState === 'peek') setSheet('half');
+    }, 150);
+  });
+
+  // ---------------- classify ----------------
   function staleLimit(kind) {
     return kind === 'trailer' ? (CFG.TRAILER_STALE_MINUTES || 1440) : (CFG.TRUCK_STALE_MINUTES || 120);
   }
@@ -260,35 +281,34 @@
     return age != null && age > (CFG.DEAD_GPS_DAYS || 30) * 1440;
   }
 
+  // Where an asset is relative to your site, in plain words.
   function describe(a, site, kind) {
     var age = ageMin(a.time);
-    var out = { dist: null, eta: null, group: 'other', label: '', cls: 'away', age: age };
+    var out = { dist: null, eta: null, group: 'other', label: '', cls: '', mph: null };
     var stale = age != null && age > staleLimit(kind);
     var moving = a.speed > MOVING_MPH && !stale;
 
     if (site && a.site === site.name) {
       out.group = 'here'; out.cls = 'here'; out.dist = 0;
       out.label = 'At ' + site.name;
-    } else if (site && site.center) {
-      var d = milesBetween(a.lat, a.lng, site.center.latitude, site.center.longitude);
-      out.dist = d;
-      var coming = moving && headingDiff(a.heading, bearing(a.lat, a.lng, site.center.latitude, site.center.longitude)) <= APPROACH_DEG;
-      if (coming && d <= ETA_MAX_MI) {
-        var mph = d < 3 ? 25 : Math.min(Math.max(a.speed, 35), 60);
-        out.eta = Math.max(1, Math.round(d * ROAD_FACTOR / mph * 60));
+    } else {
+      if (site && site.center) out.dist = milesBetween(a.lat, a.lng, site.center.latitude, site.center.longitude);
+      var coming = moving && out.dist != null &&
+        headingDiff(a.heading, bearing(a.lat, a.lng, site.center.latitude, site.center.longitude)) <= APPROACH_DEG;
+      if (coming && out.dist <= ETA_MAX_MI) {
+        var mph = out.dist < 3 ? 25 : Math.min(Math.max(a.speed, 35), 60);
+        out.eta = Math.max(1, Math.round(out.dist * ROAD_FACTOR / mph * 60));
         out.group = 'coming'; out.cls = 'coming';
-        out.label = 'Headed your way · ' + Math.round(a.speed) + ' mph';
+        out.label = 'Headed your way'; out.mph = a.speed;
       } else if (a.site) {
         out.label = 'At ' + a.site;
       } else if (moving) {
-        out.label = 'Moving · ' + Math.round(a.speed) + ' mph, not toward you';
+        out.label = 'Driving, not toward you'; out.mph = a.speed;
       } else {
-        out.label = 'Stopped';
+        out.label = 'Parked';
       }
-    } else {
-      out.label = a.site ? 'At ' + a.site : moving ? 'Moving · ' + Math.round(a.speed) + ' mph' : 'Stopped';
     }
-    if (stale) { out.cls = 'stale'; out.label = 'Old GPS · last ping ' + agoText(age); }
+    if (stale) { out.cls = 'stale'; out.mph = null; out.label = 'Last GPS ' + agoText(age); }
     return out;
   }
 
@@ -297,7 +317,8 @@
     if (!S.data) return;
     var deadN = S.data.trailers.filter(isDead).length;
     var chip = document.querySelector('.chip[data-filter="dead"]');
-    if (chip) { chip.textContent = 'No GPS 30d+ (' + deadN + ')'; chip.hidden = deadN === 0; }
+    chip.textContent = 'No GPS 30d+ (' + deadN + ')';
+    chip.hidden = deadN === 0;
     renderList();
     renderMap();
   }
@@ -314,17 +335,33 @@
     });
     return m;
   }
-
   function matchesSearch(a, extra) {
     var q = S.filters.q;
     if (!q) return true;
     var hay = [a.name, a.driver, a.address, a.site].concat(extra || []).join(' ').toLowerCase();
     return hay.indexOf(q) !== -1;
   }
+  function visibleTrucks(pulls) {
+    if (!S.filters.trucks) return [];
+    return S.data.trucks.filter(function (t) {
+      var trs = pulls[t.id] || [];
+      if (S.filters.empty && !trs.some(function (r) { return r.load && r.load.status === 'empty'; })) return false;
+      return matchesSearch(t, trs.map(function (r) { return r.name; }));
+    });
+  }
+  function visibleTrailers(tById) {
+    if (!S.filters.trailers) return [];
+    return S.data.trailers.filter(function (r) {
+      if (!S.filters.dead && isDead(r)) return false;
+      if (S.filters.empty && !(r.load && r.load.status === 'empty')) return false;
+      var tk = r.pairedTruckId ? tById[r.pairedTruckId] : null;
+      return matchesSearch(r, tk ? [tk.name, tk.driver] : []);
+    });
+  }
 
   function loadBadge(load) {
-    if (!load) return '<span class="badge unknown">STATUS ?</span>';
-    return '<span class="badge ' + load.status + '">' + load.status.toUpperCase() + '</span>';
+    if (!load) return '<span class="badge unknown">Status not set</span>';
+    return '<span class="badge ' + load.status + '">' + (load.status === 'empty' ? 'Empty' : 'Loaded') + '</span>';
   }
 
   function renderList() {
@@ -333,219 +370,301 @@
     var pulls = trailersByTruck();
     var items = [];
 
-    if (S.filters.trucks) {
-      S.data.trucks.forEach(function (t) {
-        var trs = pulls[t.id] || [];
-        if (S.filters.empty && !trs.some(function (r) { return r.load && r.load.status === 'empty'; })) return;
-        if (!matchesSearch(t, trs.map(function (r) { return r.name; }))) return;
-        items.push({ kind: 'truck', a: t, d: describe(t, site, 'truck'), trailers: trs });
-      });
-    }
-    if (S.filters.trailers) {
-      S.data.trailers.forEach(function (r) {
-        if (!S.filters.dead && isDead(r)) return;
-        if (S.filters.empty && !(r.load && r.load.status === 'empty')) return;
-        var tk = r.pairedTruckId ? tById[r.pairedTruckId] : null;
-        if (!matchesSearch(r, tk ? [tk.name, tk.driver] : [])) return;
-        // A trailer being pulled moves with its truck: use the truck's
-        // fresher position for the distance/ETA.
-        var basis = tk ? Object.assign({}, r, { lat: tk.lat, lng: tk.lng, speed: tk.speed, heading: tk.heading, time: tk.time, site: tk.site || r.site }) : r;
-        items.push({ kind: 'trailer', a: r, d: describe(basis, site, tk ? 'truck' : 'trailer'), truck: tk });
-      });
-    }
+    visibleTrucks(pulls).forEach(function (t) {
+      items.push({ kind: 'truck', a: t, d: describe(t, site, 'truck'), trailers: pulls[t.id] || [] });
+    });
+    visibleTrailers(tById).forEach(function (r) {
+      var tk = r.pairedTruckId ? tById[r.pairedTruckId] : null;
+      // A trailer being pulled moves with its truck: use the truck's fresher position.
+      var basis = tk ? Object.assign({}, r, { lat: tk.lat, lng: tk.lng, speed: tk.speed, heading: tk.heading, time: tk.time, site: tk.site || r.site }) : r;
+      items.push({ kind: 'trailer', a: r, d: describe(basis, site, tk ? 'truck' : 'trailer'), truck: tk });
+    });
 
+    var byName = function (x, y) { return x.a.name.localeCompare(y.a.name, undefined, { numeric: true }); };
     var coming = items.filter(function (i) { return i.d.group === 'coming'; })
       .sort(function (x, y) { return x.d.eta - y.d.eta; });
     var here = items.filter(function (i) { return i.d.group === 'here'; })
-      .sort(function (x, y) { return x.kind === y.kind ? x.a.name.localeCompare(y.a.name, undefined, { numeric: true }) : x.kind === 'truck' ? -1 : 1; });
+      .sort(function (x, y) { return x.kind === y.kind ? byName(x, y) : x.kind === 'truck' ? -1 : 1; });
     var other = items.filter(function (i) { return i.d.group === 'other'; })
-      .sort(function (x, y) {
-        if (x.d.dist == null || y.d.dist == null) return x.a.name.localeCompare(y.a.name, undefined, { numeric: true });
-        return x.d.dist - y.d.dist;
-      });
+      .sort(function (x, y) { return (x.d.dist == null || y.d.dist == null) ? byName(x, y) : x.d.dist - y.d.dist; });
 
-    var siteName = site ? site.name : 'your site';
-    var html = '';
-    html += section('Headed to ' + siteName, coming, 'Nothing headed your way right now.');
-    html += section('At ' + siteName, here, 'Nothing on site.');
-    html += section('Everyone else · nearest first', other, items.length ? 'None.' : 'No matches.');
-    $('list').innerHTML = html;
+    var name = site ? site.name : 'your site';
+    $('list').innerHTML =
+      section('Headed to ' + name, coming, 'Nothing is headed your way right now.') +
+      section('At ' + name, here, 'Nothing is on site.') +
+      section('Everything else, nearest first', other, items.length ? 'Nothing else.' : 'No matches. Try a different search or turn a filter back on.');
   }
 
   function section(title, list, emptyMsg) {
     var h = '<div class="section-h"><span>' + esc(title) + '</span><span class="count">' + list.length + '</span></div>';
     if (!list.length) return h + '<div class="empty-note">' + esc(emptyMsg) + '</div>';
-    return h + list.map(card).join('');
+    return h + list.map(row).join('');
   }
 
-  function card(i) {
+  function row(i) {
     var a = i.a, d = i.d;
+    var key = (i.kind === 'truck' ? 't:' : 'r:') + a.id;
     var right = '';
-    if (d.eta != null) right = '<div class="eta"><b>~' + esc(fmtEta(d.eta)) + '</b><small>' + fmtMi(d.dist) + ' mi</small></div>';
-    else if (d.dist != null && d.dist > 0) right = '<div class="eta"><b>' + fmtMi(d.dist) + '</b><small>miles</small></div>';
+    if (d.eta != null) right = '<div class="row-eta"><b>' + esc(fmtEta(d.eta)) + '</b><small>' + fmtMi(d.dist) + ' mi</small></div>';
+    else if (d.dist != null && d.dist > 0) right = '<div class="row-eta plain"><b>' + fmtMi(d.dist) + ' mi</b><small>away</small></div>';
 
-    var h = '<div class="card ' + i.kind + '" data-key="' + (i.kind === 'truck' ? 't:' : 'r:') + esc(a.id) + '">';
-    h += '<div class="card-top"><span class="kind">' + (i.kind === 'truck' ? 'Truck' : 'Trailer') + '</span>';
-    h += '<div class="card-main"><div class="card-name">' + esc(a.name) + '</div>';
-
+    var h = '<div class="row" data-key="' + esc(key) + '">';
+    h += '<div class="row-top"><span class="kind-ic ' + i.kind + '">' + (i.kind === 'truck' ? ICON_TRUCK : ICON_TRAILER) + '</span>';
+    h += '<div class="row-main"><div class="row-name">' + esc(displayName(i.kind, a.name)) + '</div>';
     if (i.kind === 'truck') {
-      h += a.driver ? '<div class="card-who">' + esc(a.driver) + '</div>' : '<div class="card-who none">No driver assigned</div>';
+      h += a.driver ? '<div class="row-sub">' + esc(a.driver) + '</div>' : '<div class="row-sub none">No driver assigned</div>';
     } else {
-      h += '<div class="card-who">' + loadBadge(a.load) + '</div>';
+      h += '<div class="row-sub">' + loadBadge(a.load) + '</div>';
     }
     h += '</div>' + right + '</div>';
 
-    h += '<span class="status ' + d.cls + '">' + esc(d.label) + '</span>';
+    h += '<div class="status ' + d.cls + '">' + esc(d.label) +
+      (d.mph != null ? ', <span class="spd ' + speedClass(d.mph) + '">' + Math.round(d.mph) + ' mph</span>' : '') + '</div>';
 
     if (i.kind === 'truck' && i.trailers.length) {
-      h += '<div class="pull">Pulling ' + i.trailers.map(function (r) {
-        return esc(r.name) + ' ' + loadBadge(r.load);
-      }).join(', ') + ' <span class="likely">(likely, from GPS)</span></div>';
+      h += '<div class="detail">Pulling ' + i.trailers.map(function (r) { return esc(r.name) + ' ' + loadBadge(r.load); }).join(', ') +
+        ' <span class="likely">likely, from GPS</span></div>';
     }
     if (i.kind === 'trailer' && i.truck) {
-      h += '<div class="pull">With truck ' + esc(i.truck.name) + (i.truck.driver ? ' · ' + esc(i.truck.driver) : '') +
-        ' <span class="likely">(likely, from GPS)</span></div>';
+      h += '<div class="detail">With ' + esc(displayName('truck', i.truck.name)) + (i.truck.driver ? ', ' + esc(i.truck.driver) : '') +
+        ' <span class="likely">likely, from GPS</span></div>';
     }
+    if (a.address && d.group !== 'here') h += '<div class="addr">' + esc(a.address) + '</div>';
 
-    if (a.address && d.group !== 'here') {
-      h += '<div class="card-detail"><span class="addr">' + esc(a.address) + '</span></div>';
-    }
-
-    h += '<div class="card-actions">';
     if (i.kind === 'trailer') {
       var st = S.pendingLoad[a.id] !== undefined ? S.pendingLoad[a.id] : (a.load ? a.load.status : null);
-      var busy = S.pendingLoad[a.id] !== undefined;
-      h += '<button class="act set-empty' + (st === 'empty' ? ' on' : '') + '" data-load="empty" data-id="' + esc(a.id) + '" data-name="' + esc(a.name) + '"' + (busy ? ' disabled' : '') + ' type="button">Empty</button>';
-      h += '<button class="act set-loaded' + (st === 'loaded' ? ' on' : '') + '" data-load="loaded" data-id="' + esc(a.id) + '" data-name="' + esc(a.name) + '"' + (busy ? ' disabled' : '') + ' type="button">Loaded</button>';
+      var busy = S.pendingLoad[a.id] !== undefined ? ' disabled' : '';
+      h += '<div class="actions">' +
+        '<button class="act set-empty' + (st === 'empty' ? ' on' : '') + '" data-load="empty" data-id="' + esc(a.id) + '" data-name="' + esc(a.name) + '"' + busy + ' type="button">Empty</button>' +
+        '<button class="act set-loaded' + (st === 'loaded' ? ' on' : '') + '" data-load="loaded" data-id="' + esc(a.id) + '" data-name="' + esc(a.name) + '"' + busy + ' type="button">Loaded</button>' +
+        '</div>';
+      if (a.load) h += '<div class="load-meta">Marked ' + esc(a.load.status) + (a.load.by ? ' by ' + esc(a.load.by) : '') + ', ' + esc(agoText(ageMin(a.load.at))) + '</div>';
     }
-    h += '<button class="act map" data-goto="' + (i.kind === 'truck' ? 't:' : 'r:') + esc(a.id) + '" type="button">Show on map</button>';
-    h += '</div>';
-
-    if (i.kind === 'trailer' && a.load) {
-      h += '<div class="load-meta">Marked ' + esc(a.load.status) + (a.load.by ? ' by ' + esc(a.load.by) : '') + ', ' + esc(agoText(ageMin(a.load.at))) + '</div>';
-    }
-    h += '</div>';
-    return h;
+    return h + '</div>';
   }
 
-  // card buttons (event delegation)
   $('list').addEventListener('click', function (e) {
     var btn = e.target.closest('button');
-    if (!btn) return;
-    if (btn.hasAttribute('data-goto')) { goTo(btn.getAttribute('data-goto')); return; }
-    if (btn.hasAttribute('data-load')) {
+    if (btn && btn.hasAttribute('data-load')) {
       var id = btn.getAttribute('data-id');
-      var name = btn.getAttribute('data-name');
       var want = btn.getAttribute('data-load');
       var tr = S.data.trailers.filter(function (r) { return r.id === id; })[0];
       var cur = tr && tr.load ? tr.load.status : null;
-      setLoad(id, name, cur === want ? 'clear' : want);
+      setLoad(id, btn.getAttribute('data-name'), cur === want ? 'clear' : want);
+      return;
     }
+    var r = e.target.closest('.row');
+    if (r) goTo(r.getAttribute('data-key'));
   });
 
   function setLoad(id, name, status) {
     S.pendingLoad[id] = status === 'clear' ? null : status;
     render();
     api('setLoad', { trailerId: id, trailerName: name, status: status, by: S.user }).then(function (j) {
-      if (!j.ok) { alert('Could not save: ' + (j.error || 'unknown error')); return; }
+      if (!j.ok) { toast('Not saved: ' + (j.error || 'unknown error'), 5000); return; }
       S.data.trailers.forEach(function (r) {
         if (r.id === id) r.load = status === 'clear' ? null : { status: status, by: S.user, at: new Date().toISOString() };
       });
     }).catch(function () {
-      alert('No connection — status was not saved.');
+      toast('No connection. The status was not saved.', 5000);
     }).then(function () {
       delete S.pendingLoad[id];
       render();
     });
   }
 
+  // ---------------- pull-up sheet (phone) ----------------
+  var sheetState = 'peek';
+  function setSheet(state) {
+    sheetState = state;
+    var el = $('sheet');
+    el.style.height = '';
+    el.setAttribute('data-state', state);
+  }
+  (function sheetDrag() {
+    var head = $('sheetHead'), el = $('sheet');
+    var startY = 0, startH = 0, dragging = false, moved = false;
+    head.addEventListener('pointerdown', function (e) {
+      if (isDesktop() || e.target.closest('select, button, input')) return;
+      dragging = true; moved = false;
+      startY = e.clientY; startH = el.getBoundingClientRect().height;
+      el.classList.add('dragging');
+      if (head.setPointerCapture) head.setPointerCapture(e.pointerId);
+    });
+    head.addEventListener('pointermove', function (e) {
+      if (!dragging) return;
+      var dy = startY - e.clientY;
+      if (Math.abs(dy) > 6) moved = true;
+      var max = window.innerHeight - 80;
+      el.style.height = Math.min(max, Math.max(PEEK_PX, startH + dy)) + 'px';
+    });
+    function end() {
+      if (!dragging) return;
+      dragging = false;
+      el.classList.remove('dragging');
+      if (!moved) { setSheet(sheetState === 'peek' ? 'half' : 'peek'); return; }
+      var h = el.getBoundingClientRect().height, vh = window.innerHeight;
+      var snaps = [['peek', PEEK_PX], ['half', vh * 0.52], ['full', vh - 80]];
+      var best = snaps.reduce(function (b, s) { return Math.abs(s[1] - h) < Math.abs(b[1] - h) ? s : b; });
+      setSheet(best[0]);
+    }
+    head.addEventListener('pointerup', end);
+    head.addEventListener('pointercancel', end);
+  })();
+
+  // Space the map should keep clear for the panel/sheet when centering.
+  function mapPadding() {
+    if (isDesktop()) return { top: 24, right: 72, bottom: 24, left: 408 + 36 };
+    var sheetH = $('sheet').getBoundingClientRect().height;
+    return { top: 80, right: 64, bottom: sheetH + 16, left: 20 };
+  }
+
   // ---------------- map (Google Maps) ----------------
   // One map load per app open. The 30s refresh only moves existing
   // markers, which Google does not bill as new loads.
-  var HtmlMarker = null;   // defined once the Google script is loaded
+  var HtmlMarker = null;
   var mapsLoading = false;
 
   function mapNote(msg) {
-    $('map').innerHTML = '<p class="empty-note" style="padding:16px">' + esc(msg) + '</p>';
+    var n = document.createElement('div');
+    n.className = 'toast'; n.style.top = 'auto'; n.style.bottom = (PEEK_PX + 20) + 'px';
+    n.textContent = msg;
+    $('app').appendChild(n);
   }
 
   function initMap() {
     if (S.map || mapsLoading) return;
-    if (!CFG.GOOGLE_MAPS_KEY) { mapNote('Map not set up yet (no Google Maps key). The Nearby list still works.'); return; }
+    if (!CFG.GOOGLE_MAPS_KEY) { mapNote('Map not set up yet: no Google Maps key in config.js. The list still works.'); return; }
     mapsLoading = true;
     window.gm_authFailure = function () {
-      S.map = null;
-      mapNote('Google Maps rejected the key. Check its website restriction. The Nearby list still works.');
+      mapNote('Google Maps rejected the key. Check its website restriction. The list still works.');
     };
     window.__fvMapsReady = function () { mapsLoading = false; createMap(); };
     var s = document.createElement('script');
     s.src = 'https://maps.googleapis.com/maps/api/js?key=' + encodeURIComponent(CFG.GOOGLE_MAPS_KEY) +
       '&v=weekly&loading=async&callback=__fvMapsReady';
     s.async = true;
-    s.onerror = function () { mapsLoading = false; mapNote('Map could not load (no signal?). The Nearby list still works.'); };
+    s.onerror = function () { mapsLoading = false; mapNote('The map could not load. Check signal. The list still works.'); };
     document.head.appendChild(s);
   }
 
   function defineHtmlMarker() {
-    // A marker drawn with our own HTML, so trucks/trailers keep their
-    // labeled badges. No Google "Map ID" needed.
+    // A marker drawn with our own HTML so trucks and trailers keep their
+    // labeled badges. Glides to new positions. No Google "Map ID" needed.
     function M(pos, html, z, onClick) {
-      this.pos = pos; this.html = html;
+      this.pos = pos; this.cur = pos; this.html = html; this.anim = null;
       this.div = document.createElement('div');
       this.div.style.position = 'absolute';
       this.div.style.zIndex = String(z);
-      this.div.style.cursor = 'pointer';
+      if (onClick) {
+        this.div.style.cursor = 'pointer';
+        var self = this;
+        this.div.addEventListener('click', function (e) { e.stopPropagation(); onClick(self); });
+      }
       this.div.innerHTML = html;
-      var self = this;
-      this.div.addEventListener('click', function (e) { e.stopPropagation(); if (onClick) onClick(self); });
     }
     M.prototype = Object.create(google.maps.OverlayView.prototype);
     M.prototype.onAdd = function () { this.getPanes().overlayMouseTarget.appendChild(this.div); };
     M.prototype.draw = function () {
       var proj = this.getProjection();
       if (!proj) return;
-      var p = proj.fromLatLngToDivPixel(this.pos);
+      var p = proj.fromLatLngToDivPixel(this.cur || this.pos);
       if (!p) return;
       this.div.style.left = p.x + 'px';
       this.div.style.top = p.y + 'px';
     };
-    M.prototype.onRemove = function () { if (this.div.parentNode) this.div.parentNode.removeChild(this.div); };
-    M.prototype.update = function (pos, html) {
-      this.pos = pos;
+    M.prototype.onRemove = function () {
+      if (this.anim) cancelAnimationFrame(this.anim);
+      if (this.div.parentNode) this.div.parentNode.removeChild(this.div);
+    };
+    M.prototype.setHtml = function (html) {
       if (html !== this.html) { this.html = html; this.div.innerHTML = html; }
-      this.draw();
+    };
+    M.prototype.moveTo = function (pos) {
+      var from = this.cur || this.pos;
+      this.pos = pos;
+      if (this.anim) { cancelAnimationFrame(this.anim); this.anim = null; }
+      var dLat = pos.lat() - from.lat(), dLng = pos.lng() - from.lng();
+      var jump = Math.abs(dLat) + Math.abs(dLng);
+      // No glide for tiny wobble, huge jumps, hidden tabs, or reduced motion.
+      if (jump < 1e-6 || jump > 0.3 || document.hidden || reduceMotion) { this.cur = pos; this.draw(); return; }
+      var self = this, t0 = performance.now();
+      function step(now) {
+        var t = Math.min(1, (now - t0) / GLIDE_MS);
+        var e = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
+        self.cur = new google.maps.LatLng(from.lat() + dLat * e, from.lng() + dLng * e);
+        self.draw();
+        self.anim = t < 1 ? requestAnimationFrame(step) : null;
+      }
+      this.anim = requestAnimationFrame(step);
     };
     HtmlMarker = M;
   }
 
   function createMap() {
     defineHtmlMarker();
-    $('map').innerHTML = '';
+    var desk = isDesktop();
     S.map = new google.maps.Map($('map'), {
       center: { lat: CFG.DEFAULT_CENTER[0], lng: CFG.DEFAULT_CENTER[1] },
       zoom: CFG.DEFAULT_ZOOM,
-      mapTypeControl: true,
-      mapTypeControlOptions: { mapTypeIds: ['roadmap', 'hybrid'], position: google.maps.ControlPosition.TOP_RIGHT },
-      streetViewControl: false,
-      fullscreenControl: false,
+      disableDefaultUI: true,
+      zoomControl: desk,
+      zoomControlOptions: { position: google.maps.ControlPosition.RIGHT_BOTTOM },
       clickableIcons: false,
-      gestureHandling: 'greedy'     // one-finger pan on phones
+      gestureHandling: 'greedy',
+      // Hide shops/restaurants/transit so trucks and trailers stand out.
+      styles: [
+        { featureType: 'poi', stylers: [{ visibility: 'off' }] },
+        { featureType: 'transit', stylers: [{ visibility: 'off' }] }
+      ]
     });
     S.info = new google.maps.InfoWindow({ pixelOffset: new google.maps.Size(0, -14) });
-    S.info.addListener('closeclick', function () { S.infoKey = null; });
-    S.map.addListener('click', function () { S.info.close(); S.infoKey = null; });
+    S.info.addListener('closeclick', function () {
+      if (S.infoKey === 'stop') { S.infoKey = null; return; }   // keep the route showing
+      deselect();
+    });
+    S.map.addListener('click', function () { S.info.close(); deselect(); });
     if (S.data) render();
   }
 
-  function centerOn(lat, lng, zoom) {
+  // map buttons
+  $('layerBtn').addEventListener('click', function () {
     if (!S.map) return;
-    S.map.setCenter({ lat: lat, lng: lng });
-    if (zoom != null) S.map.setZoom(zoom);
+    var sat = S.map.getMapTypeId() !== 'hybrid';
+    S.map.setMapTypeId(sat ? 'hybrid' : 'roadmap');
+    this.classList.toggle('on', sat);
+    this.setAttribute('aria-label', sat ? 'Switch to map' : 'Switch to satellite');
+    this.title = sat ? 'Map' : 'Satellite';
+  });
+  $('siteBtn').addEventListener('click', function () { centerOnSite(); });
+  $('fitBtn').addEventListener('click', function () { fitAll(); });
+
+  function focusAt(pos, minZoom) {
+    if (!S.map) return;
+    S.map.setCenter(pos);
+    if (minZoom && S.map.getZoom() < minZoom) S.map.setZoom(minZoom);
+    var p = mapPadding();
+    // nudge so the point sits in the middle of the uncovered part of the map
+    S.map.panBy(-(p.left - p.right) / 2, (p.bottom - p.top) / 2);
+  }
+
+  function centerOnSite() {
+    var site = currentSite();
+    if (S.map && site && site.center) focusAt(new google.maps.LatLng(site.center.latitude, site.center.longitude), 12);
+  }
+
+  function fitAll() {
+    if (!S.map) return;
+    var keys = Object.keys(S.markers);
+    if (!keys.length) return;
+    var b = new google.maps.LatLngBounds();
+    keys.forEach(function (k) { b.extend(S.markers[k].pos); });
+    S.map.fitBounds(b, mapPadding());
   }
 
   function drawSites() {
     if (S.sitesDrawn || !S.data || !S.map) return;
-    var style = { strokeColor: '#7d1935', strokeWeight: 2, fillColor: '#7d1935', fillOpacity: 0.08, clickable: false, map: S.map };
+    var style = { strokeColor: '#7d1935', strokeOpacity: 0.8, strokeWeight: 2, fillColor: '#7d1935', fillOpacity: 0.07, clickable: false, map: S.map };
     S.data.sites.forEach(function (s) {
       (s.shapes || []).forEach(function (sh) {
         if (sh.type === 'polygon') {
@@ -559,50 +678,99 @@
         }
       });
       if (s.center) {
-        var lbl = new HtmlMarker(new google.maps.LatLng(s.center.latitude, s.center.longitude),
-          '<div class="mk"><span class="site-label">' + esc(s.name) + '</span></div>', 1, null);
-        lbl.setMap(S.map);
+        // label sits on the north edge of the outline, clear of parked trucks
+        var top = s.center.latitude;
+        (s.shapes || []).forEach(function (sh) {
+          if (sh.type === 'polygon') sh.vertices.forEach(function (v) { top = Math.max(top, v.latitude); });
+          else top = Math.max(top, sh.center.latitude + sh.radiusMeters / 111320);
+        });
+        new HtmlMarker(new google.maps.LatLng(top, s.center.longitude),
+          '<div class="mk"><span class="site-tag">' + esc(s.name) + '</span></div>', 1, null).setMap(S.map);
       }
     });
     S.sitesDrawn = true;
   }
 
-  function truckHtml(t) {
+  function truckHtml(t, sel, tows) {
     var moving = t.speed > MOVING_MPH;
-    return '<div class="mk mk-truck' + (moving ? '' : ' idle') + '"><span class="mk-body">' +
+    var tow = (tows || []).map(function (r) {
+      return '<span class="tow">' + (r.load ? '<span class="dot ' + r.load.status + '"></span>' : '') + esc(shortLabel(r.name)) + '</span>';
+    }).join('');
+    return '<div class="mk mk-truck' + (moving ? '' : ' idle') + (sel ? ' sel' : '') + '"><span class="mk-body">' +
       (moving ? '<span class="arw" style="transform:rotate(' + Math.round(t.heading) + 'deg)"></span>' : '') +
-      esc(shortLabel(t.name)) + '</span></div>';
+      esc(shortLabel(t.name)) +
+      (moving ? '<span class="spd ' + speedClass(t.speed) + '">' + Math.round(t.speed) + '</span>' : '') +
+      tow + '</span></div>';
   }
-  function trailerHtml(r) {
+  function trailerHtml(r, sel) {
     var age = ageMin(r.time);
     var old = age != null && age > staleLimit('trailer');
     var dot = r.load ? '<span class="dot ' + r.load.status + '"></span>' : '';
-    return '<div class="mk mk-trailer' + (old ? ' old' : '') + '"><span class="mk-body">' + dot + esc(shortLabel(r.name)) + '</span></div>';
+    return '<div class="mk mk-trailer' + (old ? ' old' : '') + (sel ? ' sel' : '') + '"><span class="mk-body">' + dot + esc(shortLabel(r.name)) + '</span></div>';
   }
 
   function truckPopup(t, pulls) {
-    var age = ageMin(t.time);
-    return '<div class="pop"><div class="pop-name">Truck ' + esc(t.name) + '</div>' +
+    var ti = S.trailInfo[t.id];
+    var route = '';
+    if (S.trail && S.trail.id === t.id) {
+      if (!ti) route = '<div class="pop-route loading">Loading the last ' + TRAIL_HOURS + ' hours</div>';
+      else if (ti.err) route = '<div class="pop-route loading">Route did not load: ' + esc(ti.err) + '</div>';
+      else route = '<div class="pop-route">Last ' + TRAIL_HOURS + ' hours: ' + fmtMi(ti.miles) + ' mi, ' +
+        ti.stops + (ti.stops === 1 ? ' stop' : ' stops') + '<button type="button" data-hide-route>Hide route</button></div>';
+    } else {
+      route = '<div class="pop-route"><button type="button" data-show-route="' + esc(t.id) + '" style="margin:0;color:var(--route);text-decoration:none;font-weight:500">Show the last ' + TRAIL_HOURS + ' hours</button></div>';
+    }
+    return '<div class="pop"><div class="pop-name">' + esc(displayName('truck', t.name)) + '</div>' +
       '<div class="pop-sub">' + esc(t.driver || 'No driver assigned') + '</div>' +
-      '<div class="pop-sub">' + (t.speed > MOVING_MPH ? Math.round(t.speed) + ' mph' : 'Stopped') + (t.site ? ' · At ' + esc(t.site) : '') + '</div>' +
+      '<div class="pop-sub">' + (t.speed > MOVING_MPH ? Math.round(t.speed) + ' mph' : 'Parked') + (t.site ? ', at ' + esc(t.site) : '') + '</div>' +
       (pulls && pulls.length ? '<div class="pop-sub">Likely pulling ' + pulls.map(function (r) { return esc(r.name) + (r.load ? ' (' + r.load.status + ')' : ''); }).join(', ') + '</div>' : '') +
-      '<div class="pop-meta">' + esc(t.address || '') + '<br>GPS ' + esc(agoText(age)) + '</div></div>';
+      '<div class="pop-meta">' + esc(t.address || '') + (t.address ? '<br>' : '') + 'GPS ' + esc(agoText(ageMin(t.time))) + '</div>' +
+      route + '</div>';
   }
   function trailerPopup(r, tk) {
-    return '<div class="pop"><div class="pop-name">Trailer ' + esc(r.name) + '</div>' +
-      '<div class="pop-sub">' + (r.load ? esc(r.load.status.toUpperCase()) : 'Status not set') + (r.site ? ' · At ' + esc(r.site) : '') + '</div>' +
-      (tk ? '<div class="pop-sub">Likely with truck ' + esc(tk.name) + (tk.driver ? ' · ' + esc(tk.driver) : '') + '</div>' : '') +
-      '<div class="pop-meta">' + esc(r.address || '') + '<br>GPS ' + esc(agoText(ageMin(r.time))) + '</div></div>';
+    return '<div class="pop"><div class="pop-name">' + esc(displayName('trailer', r.name)) + '</div>' +
+      '<div class="pop-sub">' + (r.load ? (r.load.status === 'empty' ? 'Empty' : 'Loaded') : 'Status not set') + (r.site ? ', at ' + esc(r.site) : '') + '</div>' +
+      (tk ? '<div class="pop-sub">Likely with ' + esc(displayName('truck', tk.name)) + (tk.driver ? ', ' + esc(tk.driver) : '') + '</div>' : '') +
+      '<div class="pop-meta">' + esc(r.address || '') + (r.address ? '<br>' : '') + 'GPS ' + esc(agoText(ageMin(r.time))) + '</div></div>';
+  }
+
+  function select(key) {
+    var prev = S.selKey;
+    S.selKey = key;
+    [prev, key].forEach(function (k) {
+      var m = k && S.markers[k];
+      if (m) m.setHtml(m.htmlFn());
+    });
+  }
+  function deselect() {
+    S.infoKey = null;
+    select(null);
+    clearTrail();
   }
 
   function openPopup(key) {
     var m = S.markers[key];
     if (!m || !S.info) return;
+    if (S.trail && S.trail.id !== key.slice(2)) clearTrail();
     S.infoKey = key;
-    S.info.setContent(m.popup);
+    select(key);
+    S.info.setContent(m.popupFn());
     S.info.setPosition(m.pos);
     S.info.open({ map: S.map });
+    if (key.indexOf('t:') === 0) showTrail(key.slice(2));
   }
+  function refreshPopup() {
+    var m = S.infoKey && S.markers[S.infoKey];
+    if (m) S.info.setContent(m.popupFn());
+  }
+
+  // popup buttons (InfoWindow content lives outside our containers)
+  document.addEventListener('click', function (e) {
+    var b = e.target.closest('[data-hide-route], [data-show-route]');
+    if (!b) return;
+    if (b.hasAttribute('data-hide-route')) { clearTrail(); refreshPopup(); }
+    else showTrail(b.getAttribute('data-show-route'));
+  });
 
   function renderMap() {
     if (!S.map || !HtmlMarker) return;
@@ -611,59 +779,62 @@
     var tById = trucksById();
     var pulls = trailersByTruck();
 
-    function upsert(key, lat, lng, html, popup, z) {
+    function upsert(key, lat, lng, htmlFn, popupFn, z) {
       seen[key] = true;
       var pos = new google.maps.LatLng(lat, lng);
       var m = S.markers[key];
       if (!m) {
-        m = new HtmlMarker(pos, html, z, function () { openPopup(key); });
+        m = new HtmlMarker(pos, '', z, function () { openPopup(key); });
+        m.htmlFn = htmlFn; m.setHtml(htmlFn());
         m.setMap(S.map);
         S.markers[key] = m;
       } else {
-        m.update(pos, html);
+        m.htmlFn = htmlFn; m.setHtml(htmlFn());
+        m.moveTo(pos);
       }
-      m.popup = popup;
-      if (S.infoKey === key) { S.info.setContent(popup); S.info.setPosition(pos); }
+      m.popupFn = popupFn;
+      if (S.infoKey === key) { S.info.setContent(popupFn()); S.info.setPosition(pos); }
     }
 
-    if (S.filters.trailers) {
-      S.data.trailers.forEach(function (r) {
-        if (!S.filters.dead && isDead(r)) return;
-        if (S.filters.empty && !(r.load && r.load.status === 'empty')) return;
-        var tk = r.pairedTruckId ? tById[r.pairedTruckId] : null;
-        if (!matchesSearch(r, tk ? [tk.name, tk.driver] : [])) return;
-        upsert('r:' + r.id, r.lat, r.lng, trailerHtml(r), trailerPopup(r, tk), 10);
-      });
-    }
-    if (S.filters.trucks) {
-      S.data.trucks.forEach(function (t) {
-        var trs = pulls[t.id] || [];
-        if (S.filters.empty && !trs.some(function (r) { return r.load && r.load.status === 'empty'; })) return;
-        if (!matchesSearch(t, trs.map(function (r) { return r.name; }))) return;
-        upsert('t:' + t.id, t.lat, t.lng, truckHtml(t), truckPopup(t, trs), 20);
-      });
-    }
+    var truckShown = {};
+    visibleTrucks(pulls).forEach(function (t) { truckShown[t.id] = true; });
+    visibleTrailers(tById).forEach(function (r) {
+      var key = 'r:' + r.id, tk = r.pairedTruckId ? tById[r.pairedTruckId] : null;
+      if (tk && truckShown[tk.id]) return;   // rides inside its truck's badge instead
+      upsert(key, r.lat, r.lng,
+        function () { return trailerHtml(r, S.selKey === key); },
+        function () { return trailerPopup(r, tk); }, 10);
+    });
+    visibleTrucks(pulls).forEach(function (t) {
+      var key = 't:' + t.id, trs = pulls[t.id] || [];
+      upsert(key, t.lat, t.lng,
+        function () { return truckHtml(t, S.selKey === key, trs); },
+        function () { return truckPopup(t, trs); }, 20);
+      // keep the drawn route connected to the truck as it moves
+      if (S.trail && S.trail.id === t.id && S.trail.line) {
+        S.trail.line.forEach(function (pl) { pl.getPath().push(new google.maps.LatLng(t.lat, t.lng)); });
+      }
+    });
 
     Object.keys(S.markers).forEach(function (k) {
       if (!seen[k]) {
         S.markers[k].setMap(null);
         delete S.markers[k];
-        if (S.infoKey === k) { S.info.close(); S.infoKey = null; }
+        if (S.infoKey === k) { S.info.close(); deselect(); }
       }
     });
 
-    if (!S.centeredOnce) {
-      var site = currentSite();
-      if (site && site.center) centerOn(site.center.latitude, site.center.longitude, 11);
-      S.centeredOnce = true;
-    }
+    if (!S.centeredOnce) { S.centeredOnce = true; centerOnSite(); }
   }
 
   function goTo(key) {
-    if (window.innerWidth < 900) setView('map');
     if (!S.map) return;
+    if (key.indexOf('r:') === 0 && !S.markers[key]) {
+      var tr = S.data.trailers.filter(function (r) { return 'r:' + r.id === key; })[0];
+      if (tr && tr.pairedTruckId && S.markers['t:' + tr.pairedTruckId]) key = 't:' + tr.pairedTruckId;
+    }
     if (!S.markers[key]) {
-      // filtered off the map — turn everything back on and retry
+      // filtered off the map: turn everything back on and retry
       S.filters.trucks = S.filters.trailers = S.filters.dead = true; S.filters.empty = false;
       Array.prototype.forEach.call(document.querySelectorAll('.chip'), function (c) {
         c.classList.toggle('on', !!S.filters[c.getAttribute('data-filter')]);
@@ -671,12 +842,59 @@
       render();
       if (!S.markers[key]) return;
     }
-    var m = S.markers[key];
+    if (!isDesktop()) setSheet('peek');
     setTimeout(function () {
-      S.map.setCenter(m.pos);
-      if (S.map.getZoom() < 14) S.map.setZoom(14);
+      focusAt(S.markers[key].pos, 14);
       openPopup(key);
-    }, 60);
+    }, isDesktop() ? 0 : 260);
+  }
+
+  // ---------------- route trail ----------------
+  function clearTrail() {
+    if (!S.trail) return;
+    (S.trail.line || []).forEach(function (pl) { pl.setMap(null); });
+    (S.trail.stops || []).forEach(function (m) { m.setMap(null); });
+    S.trail = null;
+  }
+
+  function showTrail(truckId) {
+    if (!S.map) return;
+    clearTrail();
+    var token = { id: truckId, line: null, stops: [] };
+    S.trail = token;
+    delete S.trailInfo[truckId];
+    refreshPopup();
+    api('trail', { vehicleId: truckId, hours: TRAIL_HOURS }).then(function (j) {
+      if (S.trail !== token) return;           // user moved on
+      if (!j.ok) { S.trailInfo[truckId] = { err: j.error || 'unknown error' }; refreshPopup(); return; }
+      var path = j.points.map(function (p) { return new google.maps.LatLng(p[0], p[1]); });
+      var tk = S.data && S.data.trucks.filter(function (t) { return t.id === truckId; })[0];
+      if (tk) path.push(new google.maps.LatLng(tk.lat, tk.lng));
+      // white casing under a blue line, like Google directions
+      token.line = [
+        new google.maps.Polyline({ path: path, strokeColor: '#ffffff', strokeOpacity: 1, strokeWeight: 8, zIndex: 4, clickable: false, map: S.map }),
+        new google.maps.Polyline({ path: path, strokeColor: '#1a73e8', strokeOpacity: 1, strokeWeight: 5, zIndex: 5, clickable: false, map: S.map })
+      ];
+      token.stops = (j.stops || []).map(function (st) {
+        var m = new HtmlMarker(new google.maps.LatLng(st.lat, st.lng),
+          '<div class="mk"><span class="stop-tag">' + esc(fmtStop(st.minutes)) + '</span></div>', 8, function () {
+            S.info.setContent('<div class="pop"><div class="pop-name">Stopped ' + esc(fmtStop(st.minutes)) + '</div>' +
+              '<div class="pop-sub">' + esc(clock(st.start)) + ' to ' + esc(clock(st.end)) + '</div>' +
+              (st.address ? '<div class="pop-meta">' + esc(st.address) + '</div>' : '') + '</div>');
+            S.info.setPosition(m.pos);
+            S.info.open({ map: S.map });
+            S.infoKey = 'stop';
+          });
+        m.setMap(S.map);
+        return m;
+      });
+      S.trailInfo[truckId] = { miles: j.miles || 0, stops: (j.stops || []).length };
+      refreshPopup();
+    }).catch(function () {
+      if (S.trail !== token) return;
+      S.trailInfo[truckId] = { err: 'no connection' };
+      refreshPopup();
+    });
   }
 
   // ---------------- service worker ----------------

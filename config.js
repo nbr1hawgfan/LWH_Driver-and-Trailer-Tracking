@@ -6,7 +6,7 @@ window.FLEET_CONFIG = {
   // which is normal for Google Maps. Keep it restricted in Google Cloud:
   //   Website restriction: https://nbr1hawgfan.github.io/*
   //   API restriction:     Maps JavaScript API only
-  GOOGLE_MAPS_KEY: 'AIzaSyBG4-2e1qwecM7IZ9idzCwP3nxw4SDBEvw',
+  GOOGLE_MAPS_KEY: '',
   REFRESH_SECONDS: 30,
   // Map starts here before data loads (main yard)
   DEFAULT_CENTER: [35.35153, -94.42776],
