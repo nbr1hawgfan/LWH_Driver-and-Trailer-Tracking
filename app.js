@@ -20,7 +20,7 @@
     data: null,
     lastOk: 0,
     loading: false,
-    filters: { trucks: true, trailers: true, empty: false, q: '' },
+    filters: { trucks: true, trailers: true, empty: false, dead: false, q: '' },
     map: null,
     layers: null,
     markers: {},       // key "t:<id>" / "r:<id>" -> marker
@@ -253,10 +253,18 @@
   }
 
   // ---------------- classify an asset relative to your site ----------------
-  function describe(a, site) {
+  function staleLimit(kind) {
+    return kind === 'trailer' ? (CFG.TRAILER_STALE_MINUTES || 1440) : (CFG.TRUCK_STALE_MINUTES || 120);
+  }
+  function isDead(r) {
+    var age = ageMin(r.time);
+    return age != null && age > (CFG.DEAD_GPS_DAYS || 30) * 1440;
+  }
+
+  function describe(a, site, kind) {
     var age = ageMin(a.time);
     var out = { dist: null, eta: null, group: 'other', label: '', cls: 'away', age: age };
-    var stale = age != null && age > (CFG.STALE_MINUTES || 120);
+    var stale = age != null && age > staleLimit(kind);
     var moving = a.speed > MOVING_MPH && !stale;
 
     if (site && a.site === site.name) {
@@ -288,6 +296,9 @@
   // ---------------- render ----------------
   function render() {
     if (!S.data) return;
+    var deadN = S.data.trailers.filter(isDead).length;
+    var chip = document.querySelector('.chip[data-filter="dead"]');
+    if (chip) { chip.textContent = 'No GPS 30d+ (' + deadN + ')'; chip.hidden = deadN === 0; }
     renderList();
     renderMap();
   }
@@ -328,18 +339,19 @@
         var trs = pulls[t.id] || [];
         if (S.filters.empty && !trs.some(function (r) { return r.load && r.load.status === 'empty'; })) return;
         if (!matchesSearch(t, trs.map(function (r) { return r.name; }))) return;
-        items.push({ kind: 'truck', a: t, d: describe(t, site), trailers: trs });
+        items.push({ kind: 'truck', a: t, d: describe(t, site, 'truck'), trailers: trs });
       });
     }
     if (S.filters.trailers) {
       S.data.trailers.forEach(function (r) {
+        if (!S.filters.dead && isDead(r)) return;
         if (S.filters.empty && !(r.load && r.load.status === 'empty')) return;
         var tk = r.pairedTruckId ? tById[r.pairedTruckId] : null;
         if (!matchesSearch(r, tk ? [tk.name, tk.driver] : [])) return;
         // A trailer being pulled moves with its truck: use the truck's
         // fresher position for the distance/ETA.
         var basis = tk ? Object.assign({}, r, { lat: tk.lat, lng: tk.lng, speed: tk.speed, heading: tk.heading, time: tk.time, site: tk.site || r.site }) : r;
-        items.push({ kind: 'trailer', a: r, d: describe(basis, site), truck: tk });
+        items.push({ kind: 'trailer', a: r, d: describe(basis, site, tk ? 'truck' : 'trailer'), truck: tk });
       });
     }
 
@@ -494,7 +506,7 @@
   }
   function trailerIcon(r) {
     var age = ageMin(r.time);
-    var old = age != null && age > (CFG.STALE_MINUTES || 120);
+    var old = age != null && age > staleLimit('trailer');
     var dot = r.load ? '<span class="dot ' + r.load.status + '"></span>' : '';
     var html = '<div class="mk mk-trailer' + (old ? ' old' : '') + '"><span class="mk-body">' + dot + esc(shortLabel(r.name)) + '</span></div>';
     return L.divIcon({ className: 'mk-wrap', html: html, iconSize: [0, 0] });
@@ -537,6 +549,7 @@
 
     if (S.filters.trailers) {
       S.data.trailers.forEach(function (r) {
+        if (!S.filters.dead && isDead(r)) return;
         if (S.filters.empty && !(r.load && r.load.status === 'empty')) return;
         var tk = r.pairedTruckId ? tById[r.pairedTruckId] : null;
         if (!matchesSearch(r, tk ? [tk.name, tk.driver] : [])) return;
@@ -571,7 +584,7 @@
     var m = S.markers[key];
     if (!m) {
       // filtered off the map — turn everything back on and retry
-      S.filters.trucks = S.filters.trailers = true; S.filters.empty = false;
+      S.filters.trucks = S.filters.trailers = S.filters.dead = true; S.filters.empty = false;
       Array.prototype.forEach.call(document.querySelectorAll('.chip'), function (c) {
         c.classList.toggle('on', !!S.filters[c.getAttribute('data-filter')]);
       });

@@ -59,9 +59,8 @@ insert into public.fleet_sites (name, samsara_address_ids, is_home, sort_order) 
   ('Fresno St', array['20213654'],             true,  10),
   ('5th St',    array['20213428','27196470'],  true,  20),
   ('6th St',    array['20355339'],             true,  30),
-  -- TODO: paste the Pernod address IDs from the Dwell Tracker's script
-  -- property PERNOD_GEOFENCE_IDS (comma-separated there) into this array.
-  ('Pernod Ricard', array[]::text[],           false, 90)
+  -- From the Dwell Tracker's PERNOD_GEOFENCE_IDS (Hwy 45 side + Buske Dr side)
+  ('Pernod Ricard', array['20216878','20213652'], false, 90)
 on conflict (name) do nothing;
 
 insert into public.fleet_hidden (asset_type, match_type, value, note) values

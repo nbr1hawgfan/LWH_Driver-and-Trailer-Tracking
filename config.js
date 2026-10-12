@@ -6,6 +6,10 @@ window.FLEET_CONFIG = {
   // Map starts here before data loads (main yard)
   DEFAULT_CENTER: [35.35153, -94.42776],
   DEFAULT_ZOOM: 11,
-  // A ping older than this shows as "old GPS"
-  STALE_MINUTES: 120
+  // A ping older than this shows as "old GPS".
+  // Trucks report constantly; parked trailer gateways only every few hours.
+  TRUCK_STALE_MINUTES: 120,
+  TRAILER_STALE_MINUTES: 1440,
+  // Trailers silent this long are tucked behind the "No GPS 30d+" toggle
+  DEAD_GPS_DAYS: 30
 };

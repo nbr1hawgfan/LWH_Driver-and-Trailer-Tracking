@@ -34,8 +34,12 @@ const CORS: Record<string, string> = {
   "Access-Control-Allow-Methods": "POST, OPTIONS",
 };
 
-const LIVE_TTL_MS = 20_000;          // one Samsara pull serves everyone for 20s
-const CONFIG_TTL_MS = 10 * 60_000;   // sites/geofences/hidden list refresh every 10 min
+// Supabase spins this function down after ~15s idle, so in-memory caches
+// rarely survive between refreshes. Both caches are also kept in Postgres
+// (fleet_live_cache, fleet_sites.geofence_cache) so they work across instances.
+const LIVE_TTL_MS = 20_000;               // one Samsara pull serves everyone for 20s
+const CONFIG_TTL_MS = 10 * 60_000;        // in-memory sites/hidden list
+const GEOFENCE_TTL_MS = 24 * 3600_000;    // geofence shapes re-pulled from Samsara daily
 
 // Pairing rules (miles / mph / minutes)
 const PAIR_MOVING_MPH = 5;           // both must be above this to count as "moving"
@@ -147,28 +151,61 @@ function shapeCenter(s: Shape): Pt {
   };
 }
 
+// Supabase queries occasionally fail on a cold start ("JWT issued at future"
+// clock skew). One quiet retry covers it.
+async function db<T>(label: string, run: () => PromiseLike<{ data: T | null; error: any }>): Promise<T | null> {
+  let res = await run();
+  if (res.error) {
+    await new Promise((r) => setTimeout(r, 600));
+    res = await run();
+  }
+  if (res.error) throw new Error(label + ": " + res.error.message);
+  return res.data;
+}
+
+async function shapesForSite(row: any): Promise<Shape[]> {
+  const ids: string[] = (row.samsara_address_ids ?? []).map(String);
+  const cache = row.geofence_cache;
+  const fresh = row.geofence_cached_at && Date.now() - Date.parse(row.geofence_cached_at) < GEOFENCE_TTL_MS;
+  if (fresh && cache && Array.isArray(cache.shapes) && JSON.stringify(cache.ids) === JSON.stringify(ids)) {
+    return cache.shapes as Shape[];
+  }
+
+  const shapes: Shape[] = [];
+  let failed = false;
+  for (const id of ids) {
+    try {
+      const body = await samsaraGet(`/addresses/${encodeURIComponent(id)}`);
+      const sh = shapeFromAddress(body.data);
+      if (sh) shapes.push(sh);
+    } catch (e) {
+      failed = true;
+      console.log(`address ${id} (${row.name}) failed: ${e}`);
+    }
+  }
+  if (failed && cache && Array.isArray(cache.shapes) && cache.shapes.length) {
+    return cache.shapes as Shape[];  // keep the old shapes rather than lose the site
+  }
+  if (!failed) {
+    const { error } = await sb.from("fleet_sites")
+      .update({ geofence_cache: { ids, shapes }, geofence_cached_at: new Date().toISOString() })
+      .eq("id", row.id);
+    if (error) console.log(`geofence cache save failed (${row.name}): ${error.message}`);
+  }
+  return shapes;
+}
+
 async function loadConfig(): Promise<{ sites: Site[]; hidden: HiddenRule[] }> {
   if (configCache && Date.now() - configCache.at < CONFIG_TTL_MS) return configCache;
 
-  const [siteRes, hidRes] = await Promise.all([
-    sb.from("fleet_sites").select("*").eq("active", true).order("sort_order"),
-    sb.from("fleet_hidden").select("*"),
+  const [siteRows, hidRows] = await Promise.all([
+    db<any[]>("fleet_sites", () => sb.from("fleet_sites").select("*").eq("active", true).order("sort_order")),
+    db<any[]>("fleet_hidden", () => sb.from("fleet_hidden").select("*")),
   ]);
-  if (siteRes.error) throw new Error("fleet_sites: " + siteRes.error.message);
-  if (hidRes.error) throw new Error("fleet_hidden: " + hidRes.error.message);
 
   const sites: Site[] = [];
-  for (const row of siteRes.data ?? []) {
-    const shapes: Shape[] = [];
-    for (const id of row.samsara_address_ids ?? []) {
-      try {
-        const body = await samsaraGet(`/addresses/${encodeURIComponent(id)}`);
-        const sh = shapeFromAddress(body.data);
-        if (sh) shapes.push(sh);
-      } catch (e) {
-        console.log(`address ${id} (${row.name}) failed: ${e}`);
-      }
-    }
+  for (const row of siteRows ?? []) {
+    const shapes = await shapesForSite(row);
     let center: Pt | null = null;
     if (shapes.length) {
       const cs = shapes.map(shapeCenter);
@@ -180,7 +217,7 @@ async function loadConfig(): Promise<{ sites: Site[]; hidden: HiddenRule[] }> {
     sites.push({ name: row.name, isHome: row.is_home, sort: row.sort_order, shapes, center });
   }
 
-  const hidden: HiddenRule[] = (hidRes.data ?? []).map((h: any) => ({
+  const hidden: HiddenRule[] = (hidRows ?? []).map((h: any) => ({
     assetType: h.asset_type, matchType: h.match_type, value: String(h.value).toLowerCase(),
   }));
 
@@ -313,20 +350,39 @@ async function buildLive(): Promise<any> {
 }
 
 async function getLive(): Promise<any> {
+  // 1) this instance's memory
   if (liveCache && Date.now() - liveCache.at < LIVE_TTL_MS) return liveCache.body;
+
+  // 2) the shared snapshot another instance just built
+  try {
+    const { data } = await sb.from("fleet_live_cache").select("body, built_at").eq("id", 1).maybeSingle();
+    if (data && Date.now() - Date.parse(data.built_at) < LIVE_TTL_MS) {
+      liveCache = { at: Date.parse(data.built_at), body: data.body };
+      return data.body;
+    }
+  } catch (e) {
+    console.log("live cache read failed: " + e);
+  }
+
+  // 3) pull fresh from Samsara and share it
   if (!liveInflight) {
     liveInflight = buildLive()
-      .then((body) => { liveCache = { at: Date.now(), body }; return body; })
+      .then(async (body) => {
+        liveCache = { at: Date.now(), body };
+        const { error } = await sb.from("fleet_live_cache")
+          .upsert({ id: 1, body, built_at: new Date().toISOString() });
+        if (error) console.log("live cache save failed: " + error.message);
+        return body;
+      })
       .finally(() => { liveInflight = null; });
   }
   return await liveInflight;
 }
 
 async function loadStatuses(): Promise<Record<string, any>> {
-  const { data, error } = await sb.from("fleet_trailer_load").select("*");
-  if (error) throw new Error("fleet_trailer_load: " + error.message);
+  const rows = await db<any[]>("fleet_trailer_load", () => sb.from("fleet_trailer_load").select("*"));
   const out: Record<string, any> = {};
-  for (const r of data ?? []) out[r.trailer_id] = { status: r.status, by: r.updated_by, at: r.updated_at };
+  for (const r of rows ?? []) out[r.trailer_id] = { status: r.status, by: r.updated_by, at: r.updated_at };
   return out;
 }
 
@@ -384,7 +440,12 @@ Deno.serve(async (req) => {
       return json({ ok: true });
     }
 
-    if (action === "reloadConfig") { configCache = null; liveCache = null; return json({ ok: true }); }
+    if (action === "reloadConfig") {
+      configCache = null; liveCache = null;
+      await sb.from("fleet_sites").update({ geofence_cached_at: null }).neq("id", 0);
+      await sb.from("fleet_live_cache").delete().eq("id", 1);
+      return json({ ok: true });
+    }
 
     return json({ ok: false, error: "Unknown action" }, 400);
   } catch (e) {

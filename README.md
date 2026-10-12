@@ -24,14 +24,8 @@ Supabase Dashboard → LWH Companion → SQL Editor → paste and run
 `supabase/migrations/20261011_fleet_view.sql`.
 
 It creates the tables and seeds:
-- Sites: Fresno St, 5th St (both addresses), 6th St, and Pernod Ricard
+- Sites: Fresno St, 5th St (both addresses), 6th St, and Pernod Ricard (both sides)
 - Hidden: the 3 trailers from the Dwell Tracker + the Fleet Command vehicle exclusions
-
-**Pernod Ricard IDs:** open the Dwell Tracker's Apps Script → Project Settings → Script
-Properties → copy `PERNOD_GEOFENCE_IDS`, then run:
-```sql
-update fleet_sites set samsara_address_ids = array['ID1','ID2'] where name = 'Pernod Ricard';
-```
 
 ### 2. Secrets
 Dashboard → Edge Functions → Secrets → add:
