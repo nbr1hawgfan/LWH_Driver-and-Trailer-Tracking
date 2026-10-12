@@ -683,6 +683,8 @@
     S.proj.onAdd = function () {}; S.proj.draw = function () {}; S.proj.onRemove = function () {};
     S.proj.setMap(S.map);
     S.map.addListener('idle', recluster);
+    S.map.addListener('dragstart', hideHover);
+    S.map.addListener('zoom_changed', hideHover);
     // while Street View is open, our search bar / panel / buttons step aside
     var sv = S.map.getStreetView();
     sv.addListener('visible_changed', function () { document.body.classList.toggle('sv-on', !!sv.getVisible()); });
@@ -885,7 +887,8 @@
       var pos = new google.maps.LatLng(lat, lng);
       var m = S.markers[key];
       if (!m) {
-        m = new HtmlMarker(pos, '', z, function () { openPopup(key); });
+        m = new HtmlMarker(pos, '', z, function () { hideHover(); openPopup(key); });
+        attachHover(m);
         m.htmlFn = htmlFn; m.setHtml(htmlFn());
         m.setMap(S.map);
         S.markers[key] = m;
@@ -907,7 +910,8 @@
         function () { return trailerHtml(r, S.selKey === key); },
         function () { return trailerPopup(r, tk); }, 10,
         { moving: r.speed > MOVING_MPH, site: r.site, addr: r.address, name: r.name,
-          label: displayName('trailer', r.name), sub: r.load ? (r.load.status === 'empty' ? 'Empty' : 'Loaded') : 'Status not set' });
+          label: displayName('trailer', r.name), sub: r.load ? (r.load.status === 'empty' ? 'Empty' : 'Loaded') : 'Status not set',
+          extra: tk ? 'With ' + displayName('truck', tk.name) + (tk.driver ? ', ' + tk.driver : '') : '' });
     });
     visibleTrucks(pulls).forEach(function (t) {
       var key = 't:' + t.id, trs = pulls[t.id] || [];
@@ -915,7 +919,9 @@
         function () { return truckHtml(t, S.selKey === key, trs); },
         function () { return truckPopup(t, trs); }, 20,
         { moving: t.speed > MOVING_MPH, site: t.site, addr: t.address, name: t.name,
-          label: displayName('truck', t.name), sub: t.driver || 'No driver assigned' });
+          label: displayName('truck', t.name), sub: t.driver || 'No driver assigned',
+          extra: [t.speed > MOVING_MPH ? Math.round(t.speed) + ' mph' : 'Parked', t.fuel != null ? 'Fuel ' + t.fuel + '%' : ''].filter(Boolean).join(', '),
+          fuelLv: fuelLevel(t.fuel) });
       // keep the drawn route connected to the truck as it moves
       if (S.trail && S.trail.id === t.id && S.trail.line) {
         S.trail.line.forEach(function (pl) { pl.getPath().push(new google.maps.LatLng(t.lat, t.lng)); });
@@ -957,6 +963,36 @@
     var b = e.target.closest('[data-goto-key]');
     if (b) goTo(b.getAttribute('data-goto-key'));
   });
+
+  // ---------------- hover label (mouse only) ----------------
+  // Pointing at a truck shows its driver without clicking. Phones skip this; tap opens the full popup.
+  var canHover = window.matchMedia('(hover: hover) and (pointer: fine)').matches;
+  var hoverEl = null;
+  function attachHover(m) {
+    if (!canHover) return;
+    m.div.addEventListener('mouseenter', function () { showHover(m); });
+    m.div.addEventListener('mouseleave', hideHover);
+  }
+  function showHover(m) {
+    if (!m.meta || !m.meta.label) return;
+    var body = m.div.querySelector('.mk-body');
+    if (!body) return;
+    if (!hoverEl) {
+      hoverEl = document.createElement('div');
+      hoverEl.className = 'hover-card';
+      hoverEl.setAttribute('role', 'tooltip');
+      $('app').appendChild(hoverEl);
+    }
+    var none = /^No driver/.test(m.meta.sub || '');
+    hoverEl.innerHTML = '<div class="hc-name">' + esc(m.meta.label) + '</div>' +
+      '<div class="hc-sub' + (none ? ' none' : '') + '">' + esc(m.meta.sub || '') + '</div>' +
+      (m.meta.extra ? '<div class="hc-extra' + (m.meta.fuelLv === 'low' || m.meta.fuelLv === 'crit' ? ' ' + m.meta.fuelLv : '') + '">' + esc(m.meta.extra) + '</div>' : '');
+    var r = body.getBoundingClientRect(), app = $('app').getBoundingClientRect();
+    hoverEl.style.left = (r.left + r.width / 2 - app.left) + 'px';
+    hoverEl.style.top = (r.top - app.top - 8) + 'px';
+    hoverEl.hidden = false;
+  }
+  function hideHover() { if (hoverEl) hoverEl.hidden = true; }
 
   // ---------------- grouping crowded spots ----------------
   // Zoomed out, parked trucks/trailers sitting close together on screen

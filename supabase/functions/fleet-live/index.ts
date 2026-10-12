@@ -463,6 +463,34 @@ async function refreshMpg(): Promise<void> {
   mpgMem = { at: Date.now(), body: out };
 }
 
+// ---------------- Samsara address book copy (daily) ----------------
+// Lets new warehouses be matched to their real Samsara outlines by address.
+const BOOK_TTL_MS = 24 * 3600_000;
+let bookCheckedAt = 0;
+
+function syncAddressBookIfDue(): void {
+  if (Date.now() - bookCheckedAt < 10 * 60_000) return;     // check at most every 10 min
+  bookCheckedAt = Date.now();
+  const job = (async () => {
+    const { data } = await sb.from("fleet_address_book").select("synced_at").order("synced_at", { ascending: false }).limit(1);
+    if (data && data.length && Date.now() - Date.parse(data[0].synced_at) < BOOK_TTL_MS) return;
+    const rows = await samsaraAll("/addresses", { limit: "512" });
+    const now = new Date().toISOString();
+    const recs = rows.filter((a: any) => a?.id).map((a: any) => ({
+      id: String(a.id), name: a.name ?? null, formatted_address: a.formattedAddress ?? null,
+      latitude: typeof a.latitude === "number" ? a.latitude : null,
+      longitude: typeof a.longitude === "number" ? a.longitude : null,
+      geofence: a.geofence ?? null, synced_at: now,
+    }));
+    for (let i = 0; i < recs.length; i += 200) {
+      const { error } = await sb.from("fleet_address_book").upsert(recs.slice(i, i + 200));
+      if (error) throw new Error(error.message);
+    }
+    console.log("address book synced: " + recs.length);
+  })().catch((e) => console.log("address book sync failed: " + e));
+  (globalThis as any).EdgeRuntime?.waitUntil?.(job);
+}
+
 // ---------------- route trail for one truck (on tap) ----------------
 // Ported from detectStops() in the Fleet Command GAS project.
 const STOP_MPH = 2;                  // slower than this counts as stopped
@@ -568,6 +596,7 @@ Deno.serve(async (req) => {
     if (action === "ping") return json({ ok: true });
 
     if (action === "live") {
+      syncAddressBookIfDue();
       const [live, loads] = await Promise.all([getLive(), loadStatuses()]);
       return json({
         ...live,

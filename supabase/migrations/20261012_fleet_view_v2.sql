@@ -39,3 +39,18 @@ create table if not exists public.fleet_mpg_cache (
   built_at  timestamptz not null default now()
 );
 alter table public.fleet_mpg_cache enable row level security;
+
+-- Copy of the Samsara address book, refreshed daily by the function
+create table if not exists public.fleet_address_book (
+  id text primary key, name text, formatted_address text,
+  latitude double precision, longitude double precision, geofence jsonb,
+  synced_at timestamptz not null default now()
+);
+alter table public.fleet_address_book enable row level security;
+
+-- More LWH warehouses for the "I'm at" picker
+insert into public.fleet_sites (name, samsara_address_ids, is_home, sort_order, center_lat, center_lng, radius_m) values
+  ('Zero St',   array['25818344'],            true, 50, null, null, null),    -- 3333 S Zero St (Samsara outline)
+  ('Van Buren', array['20213651','27709605'], true, 60, null, null, null),    -- 810 S 28th St (Samsara outlines)
+  ('Ball Rd',   '{}',                         true, 70, 35.3065, -94.3899, 250) -- 8505 Ball Rd, estimated: not in Samsara
+on conflict (name) do nothing;

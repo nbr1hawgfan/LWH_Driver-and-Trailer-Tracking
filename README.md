@@ -24,7 +24,7 @@ Supabase Dashboard → LWH Companion → SQL Editor → paste and run
 `supabase/migrations/20261011_fleet_view.sql`.
 
 It creates the tables and seeds:
-- Sites: Fresno St, 5th St (both addresses), 6th St, and Pernod Ricard (both sides)
+- Sites: Fresno St, 5th St (both addresses), 6th St, Pernod Ricard (both sides); v2 adds Truck Yard, Zero St, Van Buren, Ball Rd
 - Hidden: the 3 trailers from the Dwell Tracker + the Fleet Command vehicle exclusions
 
 ### 2. Secrets
@@ -71,6 +71,7 @@ On phones: open the URL → Share → **Add to Home Screen**.
 - **Hide a trailer/truck:** `insert into fleet_hidden (asset_type, match_type, value, note) values ('trailer','id','<samsara id>','why');`
 - **Add a site from Samsara:** `insert into fleet_sites (name, samsara_address_ids, is_home, sort_order) values ('New Dock', array['<address id>'], true, 40);`
 - **Add a site as a circle** (no Samsara address needed): `insert into fleet_sites (name, is_home, sort_order, center_lat, center_lng, radius_m) values ('Henryetta', false, 60, 35.449, -95.972, 300);`
+- **Find a Samsara address ID:** `select id, name, formatted_address from fleet_address_book where formatted_address ilike '%zero%';`
 - **Rename a site:** `update fleet_sites set name = 'Main Yard' where name = 'Truck Yard';`
 - Changes show within 10 minutes (config cache). Redeploying the function applies them immediately.
 - **Change the PIN:** update the `FLEET_PIN` secret. Everyone gets sent back to sign-in.
@@ -88,6 +89,7 @@ On phones: open the URL → Share → **Add to Home Screen**.
 - Moving trucks glide between updates and show their speed on the badge: amber at 60+, red at 70+.
 - A trailer that's being pulled rides inside its truck's badge instead of getting its own marker.
 - Round buttons on the right: satellite view, back to my site, show everything.
+- **Hover (PC):** point at a truck to see its driver, speed and fuel without clicking.
 - **Street View:** button in every truck/trailer popup. Opens Google's nearest street photo, facing the truck or trailer.
   Photos can be months or years old and only cover public roads. Billing: 5,000 free views a month, then $14 per 1,000.
 - **Crowded spots group up** when zoomed out: one bubble per yard or lot, like "Truck Yard: 9 trucks, 7 trailers"
