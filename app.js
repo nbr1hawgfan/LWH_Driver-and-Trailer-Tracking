@@ -16,7 +16,7 @@
   var CLUSTER_MIN = 3;       // smallest group worth a bubble
   var CLUSTER_BELOW_ZOOM = 18; // zoomed in this far, everything shows individually
   var SITE_TAGS_FROM_ZOOM = 14; // site name tags show from this zoom in
-  var PEEK_PX = 172;         // phone sheet "peek" height (matches styles.css)
+  var PEEK_PX = 96;          // phone sheet "peek" height (matches styles.css)
 
   var S = {
     pin: store('fv_pin') || '',
@@ -27,7 +27,8 @@
     map: null, markers: {}, sitesDrawn: false, centeredOnce: false, clusters: [], siteTags: {}, proj: null,
     info: null, infoKey: null, selKey: null,
     trail: null, trailInfo: {},
-    pendingLoad: {}
+    pendingLoad: {},
+    focusKey: null, follow: true
   };
 
   // ---------------- small helpers ----------------
@@ -245,6 +246,8 @@
     var s = Math.round((Date.now() - S.lastOk) / 1000);
     el.textContent = 'Updated ' + (s < 5 ? 'just now' : s < 60 ? s + 's ago' : Math.round(s / 60) + ' min ago');
     el.classList.toggle('stale', s > 120);
+    var pt = $('peekTime');
+    if (pt) pt.textContent = s < 5 ? 'just now' : s < 60 ? s + 's ago' : Math.round(s / 60) + ' min ago';
   }
 
   function fillSitePicker() {
@@ -284,15 +287,85 @@
       render();
     });
   });
-  var searchTimer = null;
+  // ---------------- search: Google-style suggestions, pick one to focus ----------------
+  var searchTimer = null, sgItems = [], sgActive = -1;
   $('search').addEventListener('input', function (e) {
+    if (S.focusKey) exitFocus(true);
+    $('clearBtn').hidden = !e.target.value;
     clearTimeout(searchTimer);
     searchTimer = setTimeout(function () {
       S.filters.q = e.target.value.trim().toLowerCase();
       render();
-      if (S.filters.q && !isDesktop() && sheetState === 'peek') setSheet('half');
-    }, 150);
+      showSuggest();
+    }, 120);
   });
+  $('search').addEventListener('focus', function () { if (!S.focusKey && $('search').value) showSuggest(); });
+  $('search').addEventListener('blur', function () { setTimeout(hideSuggest, 150); });
+  $('search').addEventListener('keydown', function (e) {
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      if (!sgItems.length) return;
+      e.preventDefault();
+      sgActive = (sgActive + (e.key === 'ArrowDown' ? 1 : -1) + sgItems.length) % sgItems.length;
+      Array.prototype.forEach.call($('suggest').querySelectorAll('.sg-item'), function (b, i) { b.classList.toggle('active', i === sgActive); });
+    } else if (e.key === 'Enter') {
+      e.preventDefault();
+      var pick = sgItems[sgActive >= 0 ? sgActive : 0];
+      if (pick) { focusOn(pick.key); $('search').blur(); }
+    } else if (e.key === 'Escape') {
+      hideSuggest();
+    }
+  });
+  $('clearBtn').addEventListener('click', function () {
+    $('search').value = ''; $('clearBtn').hidden = true;
+    S.filters.q = '';
+    if (S.focusKey) exitFocus(); else render();
+    hideSuggest();
+  });
+  $('suggest').addEventListener('mousedown', function (e) { e.preventDefault(); });   // keep the input focused
+  $('suggest').addEventListener('click', function (e) {
+    var b = e.target.closest('[data-sg]');
+    if (b) { focusOn(b.getAttribute('data-sg')); $('search').blur(); }
+  });
+
+  function matchItems(q) {
+    if (!S.data || !q) return [];
+    var out = [], tById = trucksById();
+    function score(name, driver) {
+      var n = String(name || '').toLowerCase(), d = String(driver || '').toLowerCase();
+      if (n === q || n.split(/\s+/)[0] === q) return 0;
+      if (n.indexOf(q) === 0 || d.indexOf(q) === 0) return 1;
+      if (d.split(/\s+/).some(function (w) { return w.indexOf(q) === 0; })) return 2;
+      if (n.indexOf(q) !== -1 || d.indexOf(q) !== -1) return 3;
+      return -1;
+    }
+    S.data.trucks.forEach(function (t) {
+      var s = score(t.name, t.driver);
+      if (s >= 0) out.push({ key: 't:' + t.id, kind: 'truck', s: s + (isInactiveTruck(t) ? 5 : 0), name: t.name,
+        label: displayName('truck', t.name), sub: [t.driver || 'No driver assigned', describe(t, currentSite(), 'truck').label].join(', ') });
+    });
+    S.data.trailers.forEach(function (r) {
+      var tk = r.pairedTruckId ? tById[r.pairedTruckId] : null;
+      var s = score(r.name, tk ? tk.driver : '');
+      if (s >= 0) out.push({ key: 'r:' + r.id, kind: 'trailer', s: s + 1 + (isDead(r) ? 5 : 0), name: r.name,
+        label: displayName('trailer', r.name), sub: [r.load ? (r.load.status === 'empty' ? 'Empty' : 'Loaded') : 'Status not set', r.site ? 'at ' + r.site : (tk ? 'with ' + displayName('truck', tk.name) : '')].filter(Boolean).join(', ') });
+    });
+    out.sort(function (a, b) { return a.s - b.s || a.name.localeCompare(b.name, undefined, { numeric: true }); });
+    return out.slice(0, 8);
+  }
+  function showSuggest() {
+    var q = $('search').value.trim().toLowerCase();
+    var box = $('suggest');
+    sgItems = matchItems(q); sgActive = -1;
+    if (!q || S.focusKey || document.activeElement !== $('search')) { hideSuggest(); return; }
+    box.innerHTML = sgItems.length ? sgItems.map(function (it) {
+      return '<button type="button" class="sg-item" role="option" data-sg="' + esc(it.key) + '">' +
+        '<span class="kind-ic ' + it.kind + '">' + (it.kind === 'truck' ? ICON_TRUCK : ICON_TRAILER) + '</span>' +
+        '<span class="sg-main"><span class="sg-name">' + esc(it.label) + '</span><br><span class="sg-sub">' + esc(it.sub) + '</span></span></button>';
+    }).join('') : '<div class="sg-empty">No truck, trailer or driver matches "' + esc(q) + '".</div>';
+    box.hidden = false;
+    $('search').setAttribute('aria-expanded', 'true');
+  }
+  function hideSuggest() { $('suggest').hidden = true; $('search').setAttribute('aria-expanded', 'false'); }
 
   // ---------------- classify ----------------
   function staleLimit(kind) {
@@ -372,6 +445,7 @@
     lchip.hidden = lowN === 0 && !S.filters.lowfuel;
     renderList();
     renderMap();
+    renderFocus();
   }
 
   function trucksById() {
@@ -442,6 +516,16 @@
       .sort(function (x, y) { return (x.d.dist == null || y.d.dist == null) ? byName(x, y) : x.d.dist - y.d.dist; });
 
     var name = site ? site.name : 'your site';
+    var comingTrucks = coming.filter(function (i) { return i.kind === 'truck'; }).length;
+    var hereTrucks = here.filter(function (i) { return i.kind === 'truck'; }).length;
+    var lowN = S.data.trucks.filter(isLowFuel).length;
+    var bits = [];
+    bits.push(comingTrucks ? '<span class="ps-coming">' + comingTrucks + ' headed to ' + esc(name) + '</span>'
+                           : 'None headed to ' + esc(name));
+    if (hereTrucks) bits.push(hereTrucks + ' here');
+    if (lowN) bits.push('<span class="ps-low">' + lowN + ' low fuel</span>');
+    $('peekSummary').innerHTML = '<span class="ps-main">' + bits.join(' · ') + '</span><span class="ps-time" id="peekTime"></span>';
+    updateClock();
     $('list').innerHTML =
       section('Headed to ' + name, coming, 'Nothing is headed your way right now.') +
       section('At ' + name, here, 'Nothing is on site.') +
@@ -497,7 +581,9 @@
     return h + '</div>';
   }
 
-  $('list').addEventListener('click', function (e) {
+  $('sheet').addEventListener('click', function (e) {
+    if (e.target.closest('[data-focus-close]')) { $('search').value = ''; $('clearBtn').hidden = true; S.filters.q = ''; exitFocus(); return; }
+    if (e.target.closest('[data-follow]')) { S.follow = true; followFocused(true); renderFocus(); return; }
     var btn = e.target.closest('button');
     if (btn && btn.hasAttribute('data-load')) {
       var id = btn.getAttribute('data-id');
@@ -508,7 +594,7 @@
       return;
     }
     var r = e.target.closest('.row');
-    if (r) goTo(r.getAttribute('data-key'));
+    if (r) focusOn(r.getAttribute('data-key'));
   });
 
   function setLoad(id, name, status) {
@@ -556,7 +642,8 @@
       if (!dragging) return;
       dragging = false;
       el.classList.remove('dragging');
-      if (!moved) { setSheet(sheetState === 'peek' ? 'half' : 'peek'); return; }
+      if (!moved) { if (sheetState !== 'focus') setSheet(sheetState === 'peek' ? 'half' : 'peek'); return; }
+      if (sheetState === 'focus') { setSheet('focus'); return; }
       var h = el.getBoundingClientRect().height, vh = window.innerHeight;
       var snaps = [['peek', PEEK_PX], ['half', vh * 0.52], ['full', vh - 80]];
       var best = snaps.reduce(function (b, s) { return Math.abs(s[1] - h) < Math.abs(b[1] - h) ? s : b; });
@@ -677,7 +764,8 @@
       if (S.infoKey === 'stop' || S.infoKey === 'group') { S.infoKey = null; return; }   // keep the route showing
       deselect();
     });
-    S.map.addListener('click', function () { S.info.close(); deselect(); });
+    S.map.addListener('click', function () { S.info.close(); if (!S.focusKey) deselect(); });
+    S.map.addListener('dragstart', function () { if (S.focusKey && S.follow) { S.follow = false; renderFocus(); } });
     // an invisible overlay just to read screen positions for grouping
     S.proj = new google.maps.OverlayView();
     S.proj.onAdd = function () {}; S.proj.draw = function () {}; S.proj.onRemove = function () {};
@@ -847,6 +935,7 @@
   }
   function deselect() {
     S.infoKey = null;
+    if (S.focusKey) return;            // focus mode keeps its truck selected and its route drawn
     select(null);
     clearTrail();
   }
@@ -864,14 +953,15 @@
   }
   function refreshPopup() {
     var m = S.infoKey && S.markers[S.infoKey];
-    if (m) S.info.setContent(m.popupFn());
+    if (m && S.info) S.info.setContent(m.popupFn());
+    if (S.focusKey) renderFocus();
   }
 
   // popup buttons (InfoWindow content lives outside our containers)
   document.addEventListener('click', function (e) {
     var b = e.target.closest('[data-hide-route], [data-show-route]');
     if (!b) return;
-    if (b.hasAttribute('data-hide-route')) { clearTrail(); refreshPopup(); }
+    if (b.hasAttribute('data-hide-route')) { clearTrail(); refreshPopup(); if (S.focusKey) renderFocus(); }
     else showTrail(b.getAttribute('data-show-route'));
   });
 
@@ -887,7 +977,7 @@
       var pos = new google.maps.LatLng(lat, lng);
       var m = S.markers[key];
       if (!m) {
-        m = new HtmlMarker(pos, '', z, function () { hideHover(); openPopup(key); });
+        m = new HtmlMarker(pos, '', z, function () { hideHover(); if (S.focusKey) focusOn(key); else openPopup(key); });
         attachHover(m);
         m.htmlFn = htmlFn; m.setHtml(htmlFn());
         m.setMap(S.map);
@@ -936,8 +1026,11 @@
       }
     });
 
-    if (!S.centeredOnce) { S.centeredOnce = true; centerOnSite(); }
+    if (!S.centeredOnce && !S.focusKey) { S.centeredOnce = true; centerOnSite(); }
+    var fk = focusMarkerKey();
+    Object.keys(S.markers).forEach(function (k) { S.markers[k].div.classList.toggle('fv-dim', !!fk && k !== fk); });
     recluster();
+    if (S.focusKey && S.follow) followFocused(false);
   }
 
   // Tapping a bubble for one crowded lot lists what's there; tap a name to fly to it.
@@ -961,7 +1054,10 @@
   }
   document.addEventListener('click', function (e) {
     var b = e.target.closest('[data-goto-key]');
-    if (b) goTo(b.getAttribute('data-goto-key'));
+    if (b) { if (S.info) S.info.close(); focusOn(b.getAttribute('data-goto-key')); }
+  });
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape' && S.focusKey && document.activeElement !== $('search')) { $('search').value = ''; $('clearBtn').hidden = true; exitFocus(); }
   });
 
   // ---------------- hover label (mouse only) ----------------
@@ -1059,6 +1155,7 @@
         }
       });
       bub.setMap(S.map);
+      if (S.focusKey) bub.div.classList.add('fv-dim');
       S.clusters.push(bub);
     });
   }
@@ -1083,6 +1180,144 @@
       focusAt(S.markers[key].pos, 14);
       openPopup(key);
     }, isDesktop() ? 0 : 260);
+  }
+
+  // ---------------- focus mode: one truck or trailer ----------------
+  // Picking a search result flies to it, fades everything else, follows it as it moves,
+  // draws its route, and shows all its details in the panel.
+  function findItem(key) {
+    if (!S.data || !key) return null;
+    var id = key.slice(2), list = key.charAt(0) === 't' ? S.data.trucks : S.data.trailers;
+    for (var i = 0; i < list.length; i++) if (list[i].id === id) return list[i];
+    return null;
+  }
+  // a towed trailer rides inside its truck's badge, so the map shows the truck
+  function focusMarkerKey() {
+    if (!S.focusKey) return null;
+    if (S.markers[S.focusKey]) return S.focusKey;
+    var r = S.focusKey.charAt(0) === 'r' ? findItem(S.focusKey) : null;
+    if (r && r.pairedTruckId && S.markers['t:' + r.pairedTruckId]) return 't:' + r.pairedTruckId;
+    return null;
+  }
+
+  function focusOn(key) {
+    var it = findItem(key);
+    if (!it) return;
+    hideSuggest();
+    if (S.info) S.info.close();
+    S.infoKey = null;
+    S.focusKey = key; S.follow = true;
+    var kind = key.charAt(0) === 't' ? 'truck' : 'trailer';
+    $('search').value = displayName(kind, it.name); $('clearBtn').hidden = false;
+    S.filters.q = '';
+    // make sure it isn't filtered off the map
+    S.filters.trucks = S.filters.trailers = true; S.filters.empty = S.filters.lowfuel = false;
+    if ((kind === 'truck' && isInactiveTruck(it)) || (kind === 'trailer' && isDead(it))) S.filters.dead = true;
+    Array.prototype.forEach.call(document.querySelectorAll('.chip'), function (c) {
+      c.classList.toggle('on', !!S.filters[c.getAttribute('data-filter')]);
+    });
+    $('sheet').classList.add('focus');
+    $('focusCard').hidden = false;
+    if (!isDesktop()) setSheet('focus');
+    render();
+    var mk = focusMarkerKey();
+    select(mk);
+    if (mk && mk.charAt(0) === 't') showTrail(mk.slice(2)); else clearTrail();
+    setTimeout(function () { followFocused(true); }, isDesktop() ? 0 : 280);
+  }
+
+  function exitFocus(keepSearchText) {
+    if (!S.focusKey) return;
+    S.focusKey = null; S.follow = true;
+    $('sheet').classList.remove('focus');
+    $('focusCard').hidden = true;
+    if (!keepSearchText) { $('search').value = ''; $('clearBtn').hidden = true; }
+    select(null);
+    clearTrail();
+    if (!isDesktop()) setSheet('peek');
+    render();
+  }
+
+  // keep the focused truck in the open part of the map (smooth pan, zoom in on first focus)
+  function followFocused(first) {
+    var mk = focusMarkerKey();
+    var m = mk && S.markers[mk];
+    if (!S.map || !m) return;
+    if (first) { focusAt(m.pos, 15); return; }
+    var proj = S.proj && S.proj.getProjection();
+    if (!proj) return;
+    var p = proj.fromLatLngToContainerPixel ? proj.fromLatLngToContainerPixel(m.pos) : null;
+    var pad = mapPadding(), el = $('map');
+    if (p && p.x > pad.left + 40 && p.x < el.clientWidth - pad.right - 40 && p.y > pad.top + 40 && p.y < el.clientHeight - pad.bottom - 40) return;
+    focusAt(m.pos);
+  }
+
+  function renderFocus() {
+    var box = $('focusCard');
+    if (!S.focusKey) { box.hidden = true; return; }
+    var it = findItem(S.focusKey);
+    var closeBtn = '<button class="icon-btn fc-close" type="button" data-focus-close aria-label="Back to everything">' +
+      '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6.4 5 12 10.6 17.6 5 19 6.4 13.4 12l5.6 5.6-1.4 1.4-5.6-5.6L6.4 19 5 17.6 10.6 12 5 6.4z"/></svg></button>';
+    if (!it) {
+      box.innerHTML = '<div class="fc-head"><div class="fc-titles"><div class="fc-name">Not reporting right now</div>' +
+        '<div class="fc-sub none">It dropped out of the latest Samsara update.</div></div>' + closeBtn + '</div>';
+      return;
+    }
+    var site = currentSite(), siteName = site ? site.name : 'your site';
+    var kind = S.focusKey.charAt(0) === 't' ? 'truck' : 'trailer';
+    var tById = trucksById(), pulls = trailersByTruck();
+    var tk = kind === 'trailer' && it.pairedTruckId ? tById[it.pairedTruckId] : null;
+    var basis = tk ? Object.assign({}, it, { lat: tk.lat, lng: tk.lng, speed: tk.speed, heading: tk.heading, time: tk.time, site: tk.site || it.site }) : it;
+    var d = describe(basis, site, kind === 'truck' || tk ? 'truck' : 'trailer');
+
+    var h = '<div class="fc-head"><span class="kind-ic ' + kind + '">' + (kind === 'truck' ? ICON_TRUCK : ICON_TRAILER) + '</span>' +
+      '<div class="fc-titles"><div class="fc-name">' + esc(displayName(kind, it.name)) + '</div>';
+    if (kind === 'truck') h += it.driver ? '<div class="fc-sub">' + esc(it.driver) + '</div>' : '<div class="fc-sub none">No driver assigned</div>';
+    else h += '<div class="fc-sub">' + loadBadge(it.load) + '</div>';
+    h += '</div>' + closeBtn + '</div>';
+
+    h += '<div class="fc-status ' + d.cls + '">' + esc(d.label) +
+      (d.mph != null ? ', <span class="spd ' + speedClass(d.mph) + '">' + Math.round(d.mph) + ' mph</span>' : '') + '</div>';
+    if (d.eta != null) h += '<div class="fc-eta">About ' + esc(fmtEta(d.eta)) + ' to ' + esc(siteName) + ', ' + fmtMi(d.dist) + ' mi</div>';
+    else if (d.dist) h += '<div class="fc-eta">' + fmtMi(d.dist) + ' mi from ' + esc(siteName) + '</div>';
+
+    h += '<dl class="fc-stats">';
+    if (kind === 'truck') {
+      if (it.fuel != null || it.mpg7 != null) h += '<dt>Fuel</dt><dd>' + fuelRow(it) + '</dd>';
+      if (it.engine) h += '<dt>Engine</dt><dd>' + esc(it.engine) + (it.engineSince ? ' since ' + esc(sinceText(it.engineSince)) : '') + '</dd>';
+      var trs = pulls[it.id] || [];
+      if (trs.length) h += '<dt>Pulling</dt><dd>' + trs.map(function (r) { return esc(r.name) + ' ' + loadBadge(r.load); }).join(', ') + ' <span class="likely">likely</span></dd>';
+    } else if (tk) {
+      h += '<dt>With</dt><dd>' + esc(displayName('truck', tk.name)) + (tk.driver ? ', ' + esc(tk.driver) : '') + ' <span class="likely">likely</span></dd>';
+    }
+    h += '<dt>Last GPS</dt><dd>' + esc(agoText(ageMin(basis.time))) + '</dd>';
+    if (kind === 'trailer' && it.load) h += '<dt>Marked</dt><dd>' + esc(it.load.status) + (it.load.by ? ' by ' + esc(it.load.by) : '') + ', ' + esc(agoText(ageMin(it.load.at))) + '</dd>';
+    h += '</dl>';
+
+    var addr = (tk ? tk.address : it.address) || '';
+    if (addr) h += '<div class="fc-addr">' + esc(addr) + '</div>';
+
+    var truckId = kind === 'truck' ? it.id : (tk ? tk.id : null);
+    if (truckId && S.trail && S.trail.id === truckId) {
+      var ti = S.trailInfo[truckId];
+      h += !ti ? '<div class="fc-route loading">Loading the last ' + TRAIL_HOURS + ' hours</div>'
+        : ti.err ? '<div class="fc-route loading">Route did not load: ' + esc(ti.err) + '</div>'
+        : '<div class="fc-route">Last ' + TRAIL_HOURS + ' hours: ' + fmtMi(ti.miles) + ' mi, ' + ti.stops + (ti.stops === 1 ? ' stop' : ' stops') + '</div>';
+    }
+
+    h += '<div class="fc-actions">';
+    if (kind === 'trailer') {
+      var st = S.pendingLoad[it.id] !== undefined ? S.pendingLoad[it.id] : (it.load ? it.load.status : null);
+      var busy = S.pendingLoad[it.id] !== undefined ? ' disabled' : '';
+      h += '<button class="act set-empty' + (st === 'empty' ? ' on' : '') + '" data-load="empty" data-id="' + esc(it.id) + '" data-name="' + esc(it.name) + '"' + busy + ' type="button">Empty</button>' +
+           '<button class="act set-loaded' + (st === 'loaded' ? ' on' : '') + '" data-load="loaded" data-id="' + esc(it.id) + '" data-name="' + esc(it.name) + '"' + busy + ' type="button">Loaded</button>';
+    }
+    if (!S.follow) h += '<button class="act" type="button" data-follow>Follow</button>';
+    if (truckId) h += S.trail && S.trail.id === truckId
+      ? '<button class="act" type="button" data-hide-route>Hide route</button>'
+      : '<button class="act" type="button" data-show-route="' + esc(truckId) + '">Show route</button>';
+    h += svButton(basis.lat, basis.lng) + '</div>';
+    box.innerHTML = h;
   }
 
   // ---------------- route trail ----------------

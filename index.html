@@ -40,10 +40,15 @@
     <!-- Floating search -->
     <div class="searchbar" role="search">
       <div class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></div>
-      <input id="search" type="search" placeholder="Search trucks, trailers, drivers" aria-label="Search trucks, trailers, drivers">
+      <input id="search" type="search" placeholder="Search trucks, trailers, drivers" aria-label="Search trucks, trailers, drivers"
+             autocomplete="off" role="combobox" aria-controls="suggest" aria-expanded="false" enterkeyhint="search">
+      <button id="clearBtn" class="icon-btn" type="button" aria-label="Clear search" hidden>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6.4 5 12 10.6 17.6 5 19 6.4 13.4 12l5.6 5.6-1.4 1.4-5.6-5.6L6.4 19 5 17.6 10.6 12 5 6.4z"/></svg>
+      </button>
       <button id="menuBtn" class="icon-btn" type="button" aria-label="Menu" aria-expanded="false">
         <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="5" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="12" cy="19" r="2"/></svg>
       </button>
+      <div id="suggest" class="suggest" role="listbox" aria-label="Matches" hidden></div>
       <div id="menu" class="menu" hidden>
         <div class="menu-who" id="menuWho"></div>
         <button type="button" data-menu="refresh">Refresh now</button>
@@ -70,6 +75,7 @@
     <section id="sheet" class="sheet" data-state="peek" aria-label="Trucks and trailers">
       <div class="sheet-head" id="sheetHead">
         <div class="grabber" aria-hidden="true"></div>
+        <div class="peek-summary" id="peekSummary"></div>
         <div class="site-row">
           <label for="sitePick" class="site-label">I'm at</label>
           <select id="sitePick"></select>
@@ -84,6 +90,7 @@
         </div>
       </div>
       <div id="list" class="list"></div>
+      <div id="focusCard" class="focus-card" hidden></div>
     </section>
   </div>
 

@@ -78,7 +78,12 @@ On phones: open the URL → Share → **Add to Home Screen**.
 - **Who set a trailer empty/loaded:** `select * from fleet_trailer_load_log order by updated_at desc;`
 
 ## Using it
-- **Phone:** the map fills the screen. Drag the panel at the bottom up for the list, or tap its handle. Tap any row to fly to it.
+- **Phone:** the map fills the screen. At rest the bottom panel is one line ("2 headed to Fresno St · 1 low fuel").
+  Tap it or drag it up for the list, the "I'm at" picker and the filters.
+- **Search** like Google Maps: type a truck number, trailer number or driver name and pick a match.
+  The app then focuses on it: flies there, fades everything else, follows it as it moves, draws its route,
+  and shows its details (status, ETA, fuel, MPG, engine, trailer, last GPS). Tapping a row in the list does the same.
+  Clear the search or tap the X on the card to go back to everything. Drag the map and it stops following; tap **Follow** to resume.
 - **PC:** the list sits in a panel on the left of the map.
 - **Tap a truck** to see its last 8 hours as a blue route, with each stop of 5+ minutes labeled with how long it sat. Tap the map to clear it.
 - **Fuel:** every truck shows its fuel level from Samsara, with a 7-day MPG figure when it has driven 25+ miles that week.
