@@ -483,3 +483,16 @@ button.section-h:hover { background: #f8f9fa; }
   .site-row select { max-width: 150px; }
   .site-row .filter-btn { margin-left: auto; }
 }
+
+/* Both / Trucks / Trailers switch */
+.show-seg { position: absolute; z-index: 16; top: calc(var(--safe-top) + 72px); left: 10px; display: flex;
+  background: var(--surface); border-radius: 20px; box-shadow: var(--shadow); padding: 3px; }
+.show-seg button { border: 0; background: none; height: 34px; padding: 0 14px; border-radius: 17px;
+  font-size: 15px; font-weight: 500; color: var(--ink-2); }
+.show-seg button:hover { color: var(--ink); }
+.show-seg button.on { background: var(--maroon); color: #fff; }
+body.sv-on .show-seg, body.yc-on .show-seg { display: none; }
+@media (min-width: 900px) {
+  .show-seg { top: 14px; left: calc(var(--panel-w) + 24px); }
+  .toast { top: 66px; }
+}

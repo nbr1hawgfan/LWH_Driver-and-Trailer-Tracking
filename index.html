@@ -60,6 +60,13 @@
       </div>
     </div>
 
+    <!-- Show trucks, trailers or both (one tap, always on the map) -->
+    <div class="show-seg" role="group" aria-label="Show on map">
+      <button type="button" data-show="both">Both</button>
+      <button type="button" data-show="trucks">Trucks</button>
+      <button type="button" data-show="trailers">Trailers</button>
+    </div>
+
     <!-- PC, list closed: one-line summary; tap to open the list -->
     <button id="sumPill" class="sum-pill" type="button" aria-label="Open the list" hidden></button>
 
@@ -93,8 +100,6 @@
           <button id="filterBtn" class="filter-btn" type="button" aria-expanded="false" aria-controls="chips">Filters</button>
         </div>
         <div class="chips" id="chips" role="group" aria-label="Show" hidden>
-          <button class="chip on" data-filter="trucks" type="button">Trucks</button>
-          <button class="chip on" data-filter="trailers" type="button">Trailers</button>
           <button class="chip" data-filter="lowfuel" type="button" hidden>Low fuel</button>
           <button class="chip" data-filter="empty" type="button">Empty only</button>
           <button class="chip" data-filter="dead" type="button" hidden>Inactive</button>
