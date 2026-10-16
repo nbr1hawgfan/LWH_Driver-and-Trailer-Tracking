@@ -7,10 +7,7 @@
 
   var CFG = window.FLEET_CONFIG;
   var MOVING_MPH = 5;
-  var APPROACH_DEG = 50;     // heading within this of the bearing to your site = "headed your way"
-  var ROAD_FACTOR = 1.25;    // straight-line miles -> rough road miles
-  var ETA_MAX_MI = 150;      // no ETA beyond this
-  var TRAIL_HOURS = 8;
+    var TRAIL_HOURS = 8;
   var GLIDE_MS = 2000;       // how long a truck takes to slide to its new position
   var CLUSTER_PX = 48;       // markers closer than this on screen get grouped
   var CLUSTER_MIN = 3;       // smallest group worth a bubble
@@ -28,7 +25,11 @@
     info: null, infoKey: null, selKey: null,
     trail: null, trailInfo: {},
     pendingLoad: {},
-    focusKey: null, follow: true
+    focusKey: null, follow: true,
+    // PC: list panel starts closed so the map gets the screen; remembered per device
+    panelOpen: store('fv_panel') === 'open',
+    filtersOpen: false,
+    collapsed: JSON.parse(store('fv_collapsed') || '{"here":true}')
   };
 
   // ---------------- small helpers ----------------
@@ -93,12 +94,7 @@
     return /^\d/.test(n) ? (kind === 'truck' ? 'Truck ' : 'Trailer ') + n : n;
   }
   function fmtMi(mi) { return mi < 10 ? mi.toFixed(1) : String(Math.round(mi)); }
-  function fmtEta(min) {
-    if (min < 60) return min + ' min';
-    var h = Math.floor(min / 60), m = min % 60;
-    return h + ' hr' + (m ? ' ' + m + ' min' : '');
-  }
-  function fmtStop(min) { return min < 60 ? min + ' min' : Math.floor(min / 60) + ' hr ' + (min % 60) + ' min'; }
+    function fmtStop(min) { return min < 60 ? min + ' min' : Math.floor(min / 60) + ' hr ' + (min % 60) + ' min'; }
   // ---- fuel ----
   var FUEL_ICON = '<svg class="fuel-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 3h9v18H5zM7 5v5h5V5zM15 8l3 3v7a1.5 1.5 0 0 0 3 0v-8l-3-3-1 1 2 2v2h-1z"/></svg>';
   function fuelLevel(pct) {
@@ -196,6 +192,7 @@
   function startApp() {
     $('login').hidden = true;
     $('app').hidden = false;
+    applyPanel();
     initMap();
     refresh();
     if (window.FVYard) window.FVYard.start();
@@ -288,6 +285,39 @@
       render();
     });
   });
+  // Filters sit behind one button; the count shows when anything is changed from normal.
+  var FILTER_DEFAULTS = { trucks: true, trailers: true, empty: false, dead: false, lowfuel: false, nogps: true };
+  function paintFilterBtn() {
+    var n = Object.keys(FILTER_DEFAULTS).filter(function (k) { return !!S.filters[k] !== FILTER_DEFAULTS[k]; }).length;
+    var b = $('filterBtn');
+    b.textContent = n ? 'Filters (' + n + ')' : 'Filters';
+    b.classList.toggle('on', n > 0);
+    b.setAttribute('aria-expanded', String(S.filtersOpen));
+    $('chips').hidden = !S.filtersOpen;
+  }
+  $('filterBtn').addEventListener('click', function () { S.filtersOpen = !S.filtersOpen; paintFilterBtn(); });
+
+  // ---------------- PC list panel: open / closed ----------------
+  // Closed by default so the map gets the screen. A focused truck/trailer always shows its card.
+  function panelShown() { return !isDesktop() || S.panelOpen || !!S.focusKey; }
+  function applyPanel() {
+    var closed = !panelShown();
+    document.body.classList.toggle('panel-closed', closed);
+    $('sumPill').hidden = !closed || !S.data;
+    var lb = $('listBtn');
+    lb.classList.toggle('on', S.panelOpen);
+    lb.setAttribute('aria-pressed', String(S.panelOpen));
+    lb.setAttribute('aria-label', S.panelOpen ? 'Hide list' : 'Show list');
+  }
+  function setPanel(open) {
+    S.panelOpen = open;
+    store('fv_panel', open ? 'open' : 'closed');
+    if (!open && S.focusKey) { $('search').value = ''; $('clearBtn').hidden = true; S.filters.q = ''; exitFocus(); }
+    applyPanel();
+  }
+  $('listBtn').addEventListener('click', function () { setPanel(!S.panelOpen); });
+  $('sumPill').addEventListener('click', function () { setPanel(true); });
+  window.addEventListener('resize', function () { applyPanel(); });
   // ---------------- search: Google-style suggestions, pick one to focus ----------------
   var searchTimer = null, sgItems = [], sgActive = -1;
   $('search').addEventListener('input', function (e) {
@@ -408,34 +438,28 @@
   // Where an asset is relative to your site, in plain words.
   function describe(a, site, kind) {
     var age = ageMin(a.time);
-    var out = { dist: null, eta: null, group: 'other', label: '', cls: '', mph: null };
+    var out = { dist: null, group: 'other', label: '', short: '', cls: '', mph: null };
     var stale = age != null && age > staleLimit(kind);
     var moving = a.speed > MOVING_MPH && !stale;
 
     if (site && a.site === site.name) {
       out.group = 'here'; out.cls = 'here'; out.dist = 0;
-      out.label = 'At ' + site.name;
+      out.label = out.short = 'At ' + site.name;
     } else {
       if (site && site.center) out.dist = milesBetween(a.lat, a.lng, site.center.latitude, site.center.longitude);
-      var coming = moving && out.dist != null &&
-        headingDiff(a.heading, bearing(a.lat, a.lng, site.center.latitude, site.center.longitude)) <= APPROACH_DEG;
-      if (coming && out.dist <= ETA_MAX_MI) {
-        var mph = out.dist < 3 ? 25 : Math.min(Math.max(a.speed, 35), 60);
-        out.eta = Math.max(1, Math.round(out.dist * ROAD_FACTOR / mph * 60));
-        out.group = 'coming'; out.cls = 'coming';
-        out.label = 'Headed your way'; out.mph = a.speed;
-      } else if (a.site) {
-        out.label = 'At ' + a.site;
+      if (a.site) {
+        out.label = out.short = 'At ' + a.site;
       } else if (moving) {
-        out.label = 'Driving, not toward you'; out.mph = a.speed;
+        out.label = 'Driving'; out.short = 'Driving'; out.mph = a.speed; out.cls = 'moving';
       } else {
         out.label = (kind === 'truck' && a.engine === 'Off' && a.engineSince) ? 'Parked since ' + sinceText(a.engineSince) : 'Parked';
+        out.short = 'Parked';
       }
     }
-    if (stale) { out.cls = 'stale'; out.mph = null; out.label = 'Last GPS ' + agoText(age); }
+    if (stale) { out.cls = 'stale'; out.mph = null; out.label = 'Last GPS ' + agoText(age); out.short = 'Old GPS'; }
     if (kind === 'truck' && a.engine !== undefined && isInactiveTruck(a)) {
-      out.cls = 'stale'; out.mph = null; out.eta = null; out.group = 'other';
-      out.label = 'Inactive since ' + inactiveSince(a);
+      out.cls = 'stale'; out.mph = null; out.group = 'other';
+      out.label = 'Inactive since ' + inactiveSince(a); out.short = 'Inactive';
     }
     return out;
   }
@@ -454,6 +478,8 @@
     renderList();
     renderMap();
     renderFocus();
+    paintFilterBtn();
+    applyPanel();
     if (window.FVYard) window.FVYard.onFleet();
   }
 
@@ -517,77 +543,60 @@
     });
 
     var byName = function (x, y) { return x.a.name.localeCompare(y.a.name, undefined, { numeric: true }); };
-    var coming = items.filter(function (i) { return i.d.group === 'coming'; })
-      .sort(function (x, y) { return x.d.eta - y.d.eta; });
     var here = items.filter(function (i) { return i.d.group === 'here'; })
       .sort(function (x, y) { return x.kind === y.kind ? byName(x, y) : x.kind === 'truck' ? -1 : 1; });
-    var other = items.filter(function (i) { return i.d.group === 'other'; })
+    var other = items.filter(function (i) { return i.d.group !== 'here'; })
       .sort(function (x, y) { return (x.d.dist == null || y.d.dist == null) ? byName(x, y) : x.d.dist - y.d.dist; });
 
     var name = site ? site.name : 'your site';
-    var comingTrucks = coming.filter(function (i) { return i.kind === 'truck'; }).length;
     var hereTrucks = here.filter(function (i) { return i.kind === 'truck'; }).length;
+    var hereTrailers = here.length - hereTrucks;
+    var moving = S.data.trucks.filter(function (t) { return t.speed > MOVING_MPH && !isInactiveTruck(t) && ageMin(t.time) <= staleLimit('truck'); }).length;
     var lowN = S.data.trucks.filter(isLowFuel).length;
     var bits = [];
-    bits.push(comingTrucks ? '<span class="ps-coming">' + comingTrucks + ' headed to ' + esc(name) + '</span>'
-                           : 'None headed to ' + esc(name));
-    if (hereTrucks) bits.push(hereTrucks + ' here');
+    bits.push((hereTrucks + hereTrailers) ? '<span class="ps-here">' + [hereTrucks ? hereTrucks + (hereTrucks === 1 ? ' truck' : ' trucks') : '', hereTrailers ? hereTrailers + (hereTrailers === 1 ? ' trailer' : ' trailers') : ''].filter(Boolean).join(', ') + ' at ' + esc(name) + '</span>'
+                                          : 'Nothing at ' + esc(name));
+    if (moving) bits.push(moving + ' driving');
     if (lowN) bits.push('<span class="ps-low">' + lowN + ' low fuel</span>');
-    $('peekSummary').innerHTML = '<span class="ps-main">' + bits.join(' · ') + '</span><span class="ps-time" id="peekTime"></span>';
+    var sum = '<span class="ps-main">' + bits.join(' &middot; ') + '</span>';
+    $('peekSummary').innerHTML = sum + '<span class="ps-time" id="peekTime"></span>';
+    $('sumPill').innerHTML = sum + '<span class="sp-open">List</span>';
     updateClock();
     $('list').innerHTML =
-      section('Headed to ' + name, coming, 'Nothing is headed your way right now.') +
-      section('At ' + name, here, 'Nothing is on site.') +
-      section('Everything else, nearest first', other, items.length ? 'Nothing else.' : 'No matches. Try a different search or turn a filter back on.');
+      section('here', 'At ' + name, here, 'Nothing is on site.') +
+      section('other', 'Everything else, nearest first', other, items.length ? 'Nothing else.' : 'No matches. Try a different search or turn a filter back on.');
   }
 
-  function section(title, list, emptyMsg) {
-    var h = '<div class="section-h"><span>' + esc(title) + '</span><span class="count">' + list.length + '</span></div>';
+  function section(id, title, list, emptyMsg) {
+    var shut = !!S.collapsed[id];
+    var h = '<button type="button" class="section-h" data-section="' + id + '" aria-expanded="' + !shut + '">' +
+      '<span>' + esc(title) + '</span><span class="count">' + list.length +
+      '<svg class="chev' + (shut ? '' : ' open') + '" viewBox="0 0 24 24" aria-hidden="true"><path d="M7.4 8.6 12 13.2l4.6-4.6L18 10l-6 6-6-6z"/></svg></span></button>';
+    if (shut) return h;
     if (!list.length) return h + '<div class="empty-note">' + esc(emptyMsg) + '</div>';
     return h + list.map(row).join('');
   }
 
+  // One line per truck/trailer. Everything else lives on the card that opens when you tap it.
   function row(i) {
     var a = i.a, d = i.d;
     var key = (i.kind === 'truck' ? 't:' : 'r:') + a.id;
-    var right = '';
-    if (d.eta != null) right = '<div class="row-eta"><b>' + esc(fmtEta(d.eta)) + '</b><small>' + fmtMi(d.dist) + ' mi</small></div>';
-    else if (d.dist != null && d.dist > 0) right = '<div class="row-eta plain"><b>' + fmtMi(d.dist) + ' mi</b><small>away</small></div>';
-
-    var h = '<div class="row" data-key="' + esc(key) + '">';
-    h += '<div class="row-top"><span class="kind-ic ' + i.kind + '">' + (i.kind === 'truck' ? ICON_TRUCK : ICON_TRAILER) + '</span>';
-    h += '<div class="row-main"><div class="row-name">' + esc(displayName(i.kind, a.name)) + '</div>';
+    var sub;
     if (i.kind === 'truck') {
-      h += a.driver ? '<div class="row-sub">' + esc(a.driver) + '</div>' : '<div class="row-sub none">No driver assigned</div>';
+      sub = a.driver ? esc(a.driver) : '<span class="none">No driver</span>';
+      if (i.trailers.length) sub += ' &middot; ' + i.trailers.map(function (r) { return esc(shortLabel(r.name)); }).join(', ');
     } else {
-      h += '<div class="row-sub">' + loadBadge(a.load) + '</div>';
+      sub = loadBadge(a.load) + (i.truck ? ' <span class="with">with ' + esc(shortLabel(i.truck.name)) + '</span>' : '');
     }
-    h += '</div>' + right + '</div>';
-
-    h += '<div class="status ' + d.cls + '">' + esc(d.label) +
-      (d.mph != null ? ', <span class="spd ' + speedClass(d.mph) + '">' + Math.round(d.mph) + ' mph</span>' : '') + '</div>';
-
-    if (i.kind === 'truck') h += fuelRow(a);
-    if (i.kind === 'truck' && i.trailers.length) {
-      h += '<div class="detail">Pulling ' + i.trailers.map(function (r) { return esc(r.name) + ' ' + loadBadge(r.load); }).join(', ') +
-        ' <span class="likely">likely, from GPS</span></div>';
-    }
-    if (i.kind === 'trailer' && i.truck) {
-      h += '<div class="detail">With ' + esc(displayName('truck', i.truck.name)) + (i.truck.driver ? ', ' + esc(i.truck.driver) : '') +
-        ' <span class="likely">likely, from GPS</span></div>';
-    }
-    if (a.address && d.group !== 'here') h += '<div class="addr">' + esc(a.address) + '</div>';
-
-    if (i.kind === 'trailer') {
-      var st = S.pendingLoad[a.id] !== undefined ? S.pendingLoad[a.id] : (a.load ? a.load.status : null);
-      var busy = S.pendingLoad[a.id] !== undefined ? ' disabled' : '';
-      h += '<div class="actions">' +
-        '<button class="act set-empty' + (st === 'empty' ? ' on' : '') + '" data-load="empty" data-id="' + esc(a.id) + '" data-name="' + esc(a.name) + '"' + busy + ' type="button">Empty</button>' +
-        '<button class="act set-loaded' + (st === 'loaded' ? ' on' : '') + '" data-load="loaded" data-id="' + esc(a.id) + '" data-name="' + esc(a.name) + '"' + busy + ' type="button">Loaded</button>' +
-        '</div>';
-      if (a.load) h += '<div class="load-meta">Marked ' + esc(a.load.status) + (a.load.by ? ' by ' + esc(a.load.by) : '') + ', ' + esc(agoText(ageMin(a.load.at))) + '</div>';
-    }
-    return h + '</div>';
+    var right = d.mph != null ? '<span class="spd ' + speedClass(d.mph) + '">' + Math.round(d.mph) + ' mph</span>'
+      : d.group === 'here' ? '' : (d.dist ? fmtMi(d.dist) + ' mi' : '');
+    var fuel = i.kind === 'truck' && isLowFuel(a) ? '<span class="r-fuel ' + fuelLevel(a.fuel) + '">' + FUEL_ICON + a.fuel + '%</span>' : '';
+    return '<div class="row" data-key="' + esc(key) + '" role="button" tabindex="0">' +
+      '<span class="kind-ic sm ' + i.kind + '">' + (i.kind === 'truck' ? ICON_TRUCK : ICON_TRAILER) + '</span>' +
+      '<span class="r-main"><span class="r-name">' + esc(displayName(i.kind, a.name)) + '</span><span class="r-sub">' + sub + '</span></span>' +
+      fuel +
+      '<span class="r-right"><span class="r-st ' + d.cls + '">' + esc(d.group === 'here' ? 'Here' : d.short) + '</span><small>' + right + '</small></span>' +
+      '</div>';
   }
 
   $('sheet').addEventListener('click', function (e) {
@@ -602,8 +611,20 @@
       setLoad(id, btn.getAttribute('data-name'), cur === want ? 'clear' : want);
       return;
     }
+    var sec = e.target.closest('[data-section]');
+    if (sec) {
+      var id = sec.getAttribute('data-section');
+      S.collapsed[id] = !S.collapsed[id];
+      store('fv_collapsed', JSON.stringify(S.collapsed));
+      renderList();
+      return;
+    }
     var r = e.target.closest('.row');
     if (r) focusOn(r.getAttribute('data-key'));
+  });
+  $('list').addEventListener('keydown', function (e) {
+    var r = e.target.closest('.row');
+    if (r && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); focusOn(r.getAttribute('data-key')); }
   });
 
   function setLoad(id, name, status) {
@@ -664,7 +685,7 @@
 
   // Space the map should keep clear for the panel/sheet when centering.
   function mapPadding() {
-    if (isDesktop()) return { top: 24, right: 72, bottom: 24, left: 408 + 36 };
+    if (isDesktop()) return { top: 24, right: 72, bottom: 24, left: panelShown() ? 408 + 36 : 24 };
     var sheetH = $('sheet').getBoundingClientRect().height;
     return { top: 80, right: 64, bottom: sheetH + 16, left: 20 };
   }
@@ -1229,6 +1250,7 @@
     });
     $('sheet').classList.add('focus');
     $('focusCard').hidden = false;
+    applyPanel();
     if (!isDesktop()) setSheet('focus');
     render();
     var mk = focusMarkerKey();
@@ -1242,6 +1264,7 @@
     S.focusKey = null; S.follow = true;
     $('sheet').classList.remove('focus');
     $('focusCard').hidden = true;
+    applyPanel();
     if (!keepSearchText) { $('search').value = ''; $('clearBtn').hidden = true; }
     select(null);
     clearTrail();
@@ -1289,8 +1312,7 @@
 
     h += '<div class="fc-status ' + d.cls + '">' + esc(d.label) +
       (d.mph != null ? ', <span class="spd ' + speedClass(d.mph) + '">' + Math.round(d.mph) + ' mph</span>' : '') + '</div>';
-    if (d.eta != null) h += '<div class="fc-eta">About ' + esc(fmtEta(d.eta)) + ' to ' + esc(siteName) + ', ' + fmtMi(d.dist) + ' mi</div>';
-    else if (d.dist) h += '<div class="fc-eta">' + fmtMi(d.dist) + ' mi from ' + esc(siteName) + '</div>';
+    if (d.dist) h += '<div class="fc-eta">' + fmtMi(d.dist) + ' mi from ' + esc(siteName) + '</div>';
 
     h += '<dl class="fc-stats">';
     if (kind === 'truck') {
