@@ -496,3 +496,33 @@ body.sv-on .show-seg, body.yc-on .show-seg { display: none; }
   .show-seg { top: 14px; left: calc(var(--panel-w) + 24px); }
   .toast { top: 66px; }
 }
+
+/* ---------- DVIR + trailer sitting time + moves (v1.12) ---------- */
+.mk .mk-dvir { margin: 0 -4px 0 2px; padding: 0 5px; height: 18px; line-height: 18px; border-radius: 4px;
+  background: var(--red); color: #fff; font-size: 10px; font-weight: 700; letter-spacing: .3px; }
+.r-dvir { flex: none; font-size: 12px; font-weight: 700; color: #fff; background: var(--red); border-radius: 4px; padding: 1px 6px; }
+.r-dwell { font-weight: 500; color: var(--ink-2); }
+.r-dwell.long { color: var(--amber); }
+.dw-long { color: var(--amber); font-weight: 500; }
+.dv-ok { color: var(--green); font-weight: 500; }
+.dv-bad { color: var(--red); font-weight: 500; }
+.dv-note { color: var(--ink-3); font-size: 13px; }
+.dv-defect { padding: 4px 0; }
+.dv-defect + .dv-defect { border-top: 1px solid var(--line-soft); }
+.dv-defect.bad b { color: var(--red); }
+.dv-defect small { color: var(--ink-3); }
+.fc-moves { margin: 10px 0 2px; border-top: 1px solid var(--line-soft); padding-top: 8px; }
+.fm-h { font-size: 14px; font-weight: 500; color: var(--ink-2); margin-bottom: 4px; }
+.fm-note { font-size: 13px; color: var(--ink-3); margin-top: 4px; }
+.fm-list { list-style: none; margin: 0; padding: 0 0 0 10px; border-left: 2px solid var(--line); }
+.fm-list li { position: relative; }
+.fm-list li::before { content: ''; position: absolute; left: -16px; top: 13px; width: 10px; height: 10px; border-radius: 50%;
+  background: var(--surface); border: 2px solid var(--navy); }
+.fm-list li.cur::before { background: var(--navy); }
+.fm-stay { display: block; width: 100%; text-align: left; border: 0; background: none; padding: 6px 4px; border-radius: 6px; }
+.fm-stay:hover { background: var(--hover); }
+.fm-place { display: block; font-size: 15px; font-weight: 500; }
+.fm-when { display: block; font-size: 13px; color: var(--ink-2); }
+.stop-tag.mv { background: var(--navy); color: #fff; }
+.stop-tag.mv { border-color: var(--navy); }
+.dv-defect.old { color: var(--ink-3); } .dv-defect.old b { color: var(--ink-2); }

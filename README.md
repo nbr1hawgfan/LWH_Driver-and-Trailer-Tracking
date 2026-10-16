@@ -1,4 +1,4 @@
-# LWH Fleet View — v1.11
+# LWH Fleet View — v1.12
 
 Live map and list of trucks, drivers and trailers for LWH managers.
 GitHub Pages PWA + one Supabase Edge Function (`fleet-live`) in the **LWH Companion** project.
@@ -130,6 +130,25 @@ deployed in LWH Companion; see the Driver Toolkit repo's `supabase/README.md`). 
 - Matching yard check numbers to Samsara: exact name, or the same trailing number when only one Samsara trailer has it.
 - Settings in `config.js`: `YARD_RECENT_DAYS`, `YARD_LIST_DAYS`, `YARD_REFRESH_SECONDS`.
 
+## Trailer sitting time, trailer moves, truck DVIRs (v1.12)
+All three come from Samsara through `fleet-live` (deployed v10, Oct 16 2026). Table `fleet_job_cache`
+(`supabase/migrations/20261016_fleet_view_v3.sql`, applied) holds the two background jobs' results.
+
+- **Sitting time:** a background job follows every trailer's GPS history (first pass 7 days back, then only
+  what's new, every 10 min). A trailer "sits" while it stays inside the same site, or within a quarter mile
+  off-site. Shown in the list ("4 days", amber at `DWELL_WARN_DAYS`, default 3), on the trailer card
+  ("Parked here since Mon 7:09 AM (4 days)") and in its popup. "7+ days" means it hasn't moved all week.
+  **Filters → Sitting longest** puts the longest-sitting trailers first. Trailers being pulled show no sitting time.
+- **Where it's been:** tapping a trailer loads its last 7 days: each stop of 20+ minutes (or any site visit),
+  newest first, plus miles driven. Tap a stop to fly there. **Show moves** draws the week on the map as a dashed line
+  with a tag on each stop. Pings from parked trailer gateways can be hours apart, so times are approximate.
+- **DVIRs:** truck DVIRs from Samsara E-Log (last 7 days) and open defects (last 6 months), refreshed every 15 min.
+  The truck card shows the latest pre/post-trip (safe or unsafe, when, driver) and open defects; repeat reports of
+  the same defect type collapse into one line. A red **DVIR** tag on the map, a **Defect** tag in the list and
+  **Filters → Open defects** only count defects that are unsafe or reported within `DEFECT_RECENT_DAYS` (default 14);
+  older write-ups nobody closed in Samsara still show on the card, greyed out. Mark them fixed in Samsara to clear them.
+  The key needs Samsara's Read DVIRs and Read Defects permissions (it has them as of Oct 16 2026).
+
 ## How the "smart" parts work
 
 - **At a site:** GPS point inside the Samsara geofence (polygon or circle), same math as the Dwell Tracker.
@@ -146,7 +165,7 @@ deployed in LWH Companion; see the Driver Toolkit repo's `supabase/README.md`). 
 | `config.js` | function URL, Google Maps key, refresh rate (30s), stale-GPS cutoffs (trucks 2 hr, trailers 24 hr), inactive cutoffs (trailers 30 days, trucks 60 days) |
 | `sw.js` | offline app shell; bump `VERSION` on each release |
 | `supabase/functions/fleet-live/index.ts` | the Samsara proxy |
-| `supabase/migrations/…sql` | tables + seed data (v1 and v2, both already applied) |
+| `supabase/migrations/…sql` | tables + seed data (v1, v2, v3 all applied) |
 
 ## Phase 2 ideas
 Per-person PINs, share Load Status with the Pernod Dwell Tracker,
