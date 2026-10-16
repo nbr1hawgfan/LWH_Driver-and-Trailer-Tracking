@@ -29,7 +29,8 @@
     // PC: list panel starts closed so the map gets the screen; remembered per device
     panelOpen: store('fv_panel') === 'open',
     filtersOpen: false,
-    collapsed: JSON.parse(store('fv_collapsed') || '{"here":true}')
+    collapsed: JSON.parse(store('fv_collapsed') || '{"here":true}'),
+    show: store('fv_show') || 'both'
   };
 
   // ---------------- small helpers ----------------
@@ -286,7 +287,30 @@
     });
   });
   // Filters sit behind one button; the count shows when anything is changed from normal.
-  var FILTER_DEFAULTS = { trucks: true, trailers: true, empty: false, dead: false, lowfuel: false, nogps: true };
+  var FILTER_DEFAULTS = { empty: false, dead: false, lowfuel: false, nogps: true };
+
+  // Both / Trucks / Trailers switch on the map. Remembered per device.
+  function applyShow(mode) {
+    S.show = mode;
+    S.filters.trucks = mode !== 'trailers';
+    S.filters.trailers = mode !== 'trucks';
+  }
+  function paintShow() {
+    var mode = S.filters.trucks && S.filters.trailers ? 'both' : S.filters.trucks ? 'trucks' : 'trailers';
+    Array.prototype.forEach.call(document.querySelectorAll('[data-show]'), function (b) {
+      var on = b.getAttribute('data-show') === mode;
+      b.classList.toggle('on', on); b.setAttribute('aria-pressed', String(on));
+    });
+  }
+  applyShow(S.show);
+  Array.prototype.forEach.call(document.querySelectorAll('[data-show]'), function (b) {
+    b.addEventListener('click', function () {
+      var mode = b.getAttribute('data-show');
+      if (S.focusKey) { $('search').value = ''; $('clearBtn').hidden = true; S.filters.q = ''; exitFocus(); }
+      applyShow(mode); store('fv_show', mode);
+      render();
+    });
+  });
   function paintFilterBtn() {
     var n = Object.keys(FILTER_DEFAULTS).filter(function (k) { return !!S.filters[k] !== FILTER_DEFAULTS[k]; }).length;
     var b = $('filterBtn');
@@ -479,6 +503,7 @@
     renderMap();
     renderFocus();
     paintFilterBtn();
+    paintShow();
     applyPanel();
     if (window.FVYard) window.FVYard.onFleet();
   }
@@ -1265,6 +1290,7 @@
     $('sheet').classList.remove('focus');
     $('focusCard').hidden = true;
     applyPanel();
+    applyShow(S.show);      // back to Both / Trucks / Trailers as the user left it
     if (!keepSearchText) { $('search').value = ''; $('clearBtn').hidden = true; }
     select(null);
     clearTrail();

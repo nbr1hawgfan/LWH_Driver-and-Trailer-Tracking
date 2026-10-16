@@ -1,4 +1,4 @@
-# LWH Fleet View — v1.10
+# LWH Fleet View — v1.11
 
 Live map and list of trucks, drivers and trailers for LWH managers.
 GitHub Pages PWA + one Supabase Edge Function (`fleet-live`) in the **LWH Companion** project.
@@ -88,7 +88,9 @@ On phones: open the URL → Share → **Add to Home Screen**.
   (or the one-line summary under it); each computer remembers open or closed. Searching or tapping a truck still opens its card.
 - **List:** one line per truck or trailer (name, driver or Empty/Loaded, Driving + mph / Parked / distance). Fuel only shows when low.
   Tap a row for the full card (fuel, MPG, engine, route, Empty/Loaded buttons). "At <site>" starts collapsed; tap a section header to open or close it.
-- **Filters** button holds Trucks / Trailers / Low fuel / Empty only / Inactive / No-GPS trailers; it shows a count when anything is changed.
+- **Both / Trucks / Trailers** switch sits on the map (next to the search bar on PC, under it on phones) and is remembered per device.
+  Searching something it hides switches to Both until you close that card.
+- **Filters** button holds Low fuel / Empty only / Inactive / No-GPS trailers; it shows a count when anything is changed.
 - **Tap a truck** to see its last 8 hours as a blue route, with each stop of 5+ minutes labeled with how long it sat. Tap the map to clear it.
 - **Fuel:** every truck shows its fuel level from Samsara, with a 7-day MPG figure when it has driven 25+ miles that week.
   Amber under 25%, red under 15%. Low trucks get a fuel tag on their map badge, and the **Low fuel** button lists just those trucks.

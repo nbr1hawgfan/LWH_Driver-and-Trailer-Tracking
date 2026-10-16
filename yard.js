@@ -225,7 +225,7 @@
     if (chip) { chip.textContent = 'No-GPS trailers (' + total + ')'; chip.hidden = total === 0; }
 
     var map = fv.map(), Marker = fv.Marker();
-    var show = map && Marker && fv.filters().nogps && !fv.focusKey();
+    var show = map && Marker && fv.filters().nogps && fv.filters().trailers && !fv.focusKey();
     var placed = show ? groups.filter(function (g) { return g.pos; }) : [];
     var sig = placed.map(function (g) { return g.c.id + ':' + g.list.length; }).join('|');
     if (sig === Y.markerSig) return;
