@@ -51,6 +51,7 @@
       <div id="suggest" class="suggest" role="listbox" aria-label="Matches" hidden></div>
       <div id="menu" class="menu" hidden>
         <div class="menu-who" id="menuWho"></div>
+        <button type="button" data-menu="yard">Yard checks</button>
         <button type="button" data-menu="refresh">Refresh now</button>
         <button type="button" data-menu="signout">Sign out</button>
       </div>
@@ -63,6 +64,9 @@
       </button>
       <button class="map-btn" id="siteBtn" type="button" aria-label="Center on my site" title="My site">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 10.5 12 4l8 6.5V20h-5.5v-5.5h-5V20H4z"/></svg>
+      </button>
+      <button class="map-btn" id="ycBtn" type="button" aria-label="Yard checks" title="Yard checks">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 3h6v2h3a1 1 0 0 1 1 1v14a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1h3zm0 2v1h6V5zm-1 6v2h8v-2zm0 4v2h5v-2z"/></svg>
       </button>
       <button class="map-btn" id="fitBtn" type="button" aria-label="Show everything" title="Show everything">
         <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg>
@@ -87,14 +91,33 @@
           <button class="chip" data-filter="lowfuel" type="button" hidden>Low fuel</button>
           <button class="chip" data-filter="empty" type="button">Empty only</button>
           <button class="chip" data-filter="dead" type="button" hidden>Inactive</button>
+          <button class="chip on" data-filter="nogps" type="button" hidden>No-GPS trailers</button>
         </div>
       </div>
       <div id="list" class="list"></div>
       <div id="focusCard" class="focus-card" hidden></div>
     </section>
+
+    <!-- Yard checks: same data as the Driver Toolkit Dispatch Board -->
+    <section id="ycPanel" class="yc-panel" hidden aria-label="Yard checks">
+      <div class="yc-head">
+        <button class="icon-btn" id="ycClose" type="button" aria-label="Close yard checks">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11H7.8l5.6-5.6L12 4l-8 8 8 8 1.4-1.4L7.8 13H20z"/></svg>
+        </button>
+        <h2>Yard checks</h2>
+        <span id="ycUpdated" class="updated"></span>
+      </div>
+      <div class="yc-tabs" role="tablist">
+        <button type="button" role="tab" data-yctab="yards">Yards</button>
+        <button type="button" role="tab" data-yctab="find">Find a trailer</button>
+        <button type="button" role="tab" data-yctab="new">New check</button>
+      </div>
+      <div id="ycBody" class="yc-body"></div>
+    </section>
   </div>
 
   <script src="config.js"></script>
+  <script src="yard.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

@@ -1,5 +1,5 @@
 /* ============================================================
-   LWH Fleet View — client (v1.2, Google Maps layout)
+   LWH Fleet View — client (v1.9, Google Maps layout + yard checks in yard.js)
    Talks only to the fleet-live edge function. No Samsara token here.
    ============================================================ */
 (function () {
@@ -23,7 +23,7 @@
     user: store('fv_user') || '',
     siteName: store('fv_site') || '',
     data: null, lastOk: 0, loading: false,
-    filters: { trucks: true, trailers: true, empty: false, dead: false, lowfuel: false, q: '' },
+    filters: { trucks: true, trailers: true, empty: false, dead: false, lowfuel: false, nogps: true, q: '' },
     map: null, markers: {}, sitesDrawn: false, centeredOnce: false, clusters: [], siteTags: {}, proj: null,
     info: null, infoKey: null, selKey: null,
     trail: null, trailInfo: {},
@@ -198,6 +198,7 @@
     $('app').hidden = false;
     initMap();
     refresh();
+    if (window.FVYard) window.FVYard.start();
     clearInterval(timers.refresh); clearInterval(timers.tick);
     timers.refresh = setInterval(function () {
       if (document.visibilityState === 'visible') refresh();
@@ -310,7 +311,7 @@
     } else if (e.key === 'Enter') {
       e.preventDefault();
       var pick = sgItems[sgActive >= 0 ? sgActive : 0];
-      if (pick) { focusOn(pick.key); $('search').blur(); }
+      if (pick) { pickKey(pick.key); $('search').blur(); }
     } else if (e.key === 'Escape') {
       hideSuggest();
     }
@@ -324,8 +325,14 @@
   $('suggest').addEventListener('mousedown', function (e) { e.preventDefault(); });   // keep the input focused
   $('suggest').addEventListener('click', function (e) {
     var b = e.target.closest('[data-sg]');
-    if (b) { focusOn(b.getAttribute('data-sg')); $('search').blur(); }
+    if (b) { pickKey(b.getAttribute('data-sg')); $('search').blur(); }
   });
+
+  // 'y:' keys are yard-check-only trailers (no Samsara GPS): open them in Yard Checks.
+  function pickKey(key) {
+    if (key.indexOf('y:') === 0) { hideSuggest(); if (window.FVYard) window.FVYard.pick(key); return; }
+    focusOn(key);
+  }
 
   function matchItems(q) {
     if (!S.data || !q) return [];
@@ -349,6 +356,7 @@
       if (s >= 0) out.push({ key: 'r:' + r.id, kind: 'trailer', s: s + 1 + (isDead(r) ? 5 : 0), name: r.name,
         label: displayName('trailer', r.name), sub: [r.load ? (r.load.status === 'empty' ? 'Empty' : 'Loaded') : 'Status not set', r.site ? 'at ' + r.site : (tk ? 'with ' + displayName('truck', tk.name) : '')].filter(Boolean).join(', ') });
     });
+    if (window.FVYard) out = out.concat(window.FVYard.suggest(q));
     out.sort(function (a, b) { return a.s - b.s || a.name.localeCompare(b.name, undefined, { numeric: true }); });
     return out.slice(0, 8);
   }
@@ -446,6 +454,7 @@
     renderList();
     renderMap();
     renderFocus();
+    if (window.FVYard) window.FVYard.onFleet();
   }
 
   function trucksById() {
@@ -891,7 +900,8 @@
       '<div class="pop-sub">' + (r.load ? (r.load.status === 'empty' ? 'Empty' : 'Loaded') : 'Status not set') + (r.site ? ', at ' + esc(r.site) : '') + '</div>' +
       (tk ? '<div class="pop-sub">Likely with ' + esc(displayName('truck', tk.name)) + (tk.driver ? ', ' + esc(tk.driver) : '') + '</div>' : '') +
       '<div class="pop-meta">' + esc(r.address || '') + (r.address ? '<br>' : '') + 'GPS ' + esc(agoText(ageMin(r.time))) + '</div>' +
-      svButton(r.lat, r.lng) + '</div>';
+      (window.FVYard ? '<dl class="fc-stats pop-yc">' + window.FVYard.trailerStats(r) + '</dl>' : '') +
+      svButton(r.lat, r.lng) + (window.FVYard ? window.FVYard.addButton(r) : '') + '</div>';
   }
 
   // ---------------- Street View ----------------
@@ -1201,6 +1211,7 @@
   }
 
   function focusOn(key) {
+    if (key && key.indexOf('y:') === 0) { pickKey(key); return; }
     var it = findItem(key);
     if (!it) return;
     hideSuggest();
@@ -1291,6 +1302,7 @@
       h += '<dt>With</dt><dd>' + esc(displayName('truck', tk.name)) + (tk.driver ? ', ' + esc(tk.driver) : '') + ' <span class="likely">likely</span></dd>';
     }
     h += '<dt>Last GPS</dt><dd>' + esc(agoText(ageMin(basis.time))) + '</dd>';
+    if (kind === 'trailer' && window.FVYard) h += window.FVYard.trailerStats(it);
     if (kind === 'trailer' && it.load) h += '<dt>Marked</dt><dd>' + esc(it.load.status) + (it.load.by ? ' by ' + esc(it.load.by) : '') + ', ' + esc(agoText(ageMin(it.load.at))) + '</dd>';
     h += '</dl>';
 
@@ -1316,7 +1328,9 @@
     if (truckId) h += S.trail && S.trail.id === truckId
       ? '<button class="act" type="button" data-hide-route>Hide route</button>'
       : '<button class="act" type="button" data-show-route="' + esc(truckId) + '">Show route</button>';
-    h += svButton(basis.lat, basis.lng) + '</div>';
+    h += svButton(basis.lat, basis.lng);
+    if (kind === 'trailer' && window.FVYard) h += window.FVYard.addButton(it);
+    h += '</div>';
     box.innerHTML = h;
   }
 
@@ -1374,6 +1388,27 @@
       navigator.serviceWorker.register('sw.js').catch(function () {});
     });
   }
+
+  // ---------------- bridge for yard.js ----------------
+  window.FV = {
+    data: function () { return S.data; },
+    user: function () { return S.user; },
+    site: currentSite,
+    filters: function () { return S.filters; },
+    focusKey: function () { return S.focusKey; },
+    map: function () { return S.map; },
+    Marker: function () { return HtmlMarker; },
+    truck: function (id) { return S.data ? trucksById()[id] : null; },
+    displayName: displayName,
+    toast: toast,
+    focusOn: focusOn,
+    flyTo: function (lat, lng, zoom) {
+      if (!S.map) return;
+      if (S.focusKey) exitFocus();
+      if (!isDesktop()) setSheet('peek');
+      setTimeout(function () { focusAt(new google.maps.LatLng(lat, lng), zoom || 16); }, isDesktop() ? 0 : 260);
+    }
+  };
 
   // ---------------- boot ----------------
   if (S.pin) startApp(); else showLogin('');
