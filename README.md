@@ -1,4 +1,4 @@
-# LWH Fleet View — v1.0
+# LWH Fleet View — v1.9
 
 Live map and "who's headed my way" list of trucks, drivers and trailers for LWH managers.
 GitHub Pages PWA + one Supabase Edge Function (`fleet-live`) in the **LWH Companion** project.
@@ -101,6 +101,29 @@ On phones: open the URL → Share → **Add to Home Screen**.
   (or the street name for unlisted lots, like "8201 Chad Colley Boulevard"). Tap to zoom in. For a single packed lot,
   tapping lists everything there; tap a name to fly to it. Moving trucks are never grouped.
 
+## Yard checks (v1.9)
+Same data as the Driver Toolkit's Yard Check and Dispatch Board — table `yard_checks`, bucket `yard-photos`,
+and the `yard-check-history`, `yard-check-submit`, `yard-photo-upload`, `yard-photo-urls` functions (all already
+deployed in LWH Companion; see the Driver Toolkit repo's `supabase/README.md`). Nothing new to deploy.
+
+- Open it from the clipboard button on the map or the menu (Yard checks).
+- **Yards:** each yard's latest check, newest first: who checked it and when (Driver Toolkit or Fleet View),
+  Loaded / Empty / Damaged counts, days on yard, damage photos, and a GPS column for every trailer:
+  green when Samsara can see it now, red **Not in Samsara** (no gateway, new trailer) or **GPS 3 days old**
+  (gateway quiet since before the check). Tap a green trailer number to jump to it on the map.
+  **Check this yard again** copies the trailer list into a new check with statuses cleared.
+- **Find a trailer:** every yard check that listed it (including older ones from the server), plus where Samsara last saw it.
+- **New check:** managers on site log trailers the same way drivers do: yard, optional GPS pin, Loaded / Empty,
+  note, Damaged (needs a photo). Saved with `how = "Fleet View"` and the signed-in name, so it shows on the
+  toolkit's Dispatch Board too. Photos stay in memory until saved, so keep the screen open if a save fails.
+- **On the map:** trailers from the last 14 days of yard checks that Samsara can't place show at the yard as a
+  dashed "no GPS" tag (needs the check's GPS pin, or a yard name that matches a site). Toggle with the
+  **No-GPS trailers** filter. Searching a number Samsara doesn't know offers the yard check result.
+- Trailer focus cards show the latest yard check sighting and an **Add to yard check** button.
+- Yard check Loaded/Empty is separate from the map's Empty/Loaded buttons; both show on the trailer card.
+- Matching yard check numbers to Samsara: exact name, or the same trailing number when only one Samsara trailer has it.
+- Settings in `config.js`: `YARD_RECENT_DAYS`, `YARD_LIST_DAYS`, `YARD_REFRESH_SECONDS`.
+
 ## How the "smart" parts work
 
 - **At a site:** GPS point inside the Samsara geofence (polygon or circle), same math as the Dwell Tracker.
@@ -115,6 +138,7 @@ On phones: open the URL → Share → **Add to Home Screen**.
 | File | What |
 |---|---|
 | `index.html`, `styles.css`, `app.js` | the PWA |
+| `yard.js` | yard checks panel, no-GPS map tags, trailer card lines |
 | `config.js` | function URL, Google Maps key, refresh rate (30s), stale-GPS cutoffs (trucks 2 hr, trailers 24 hr), inactive cutoffs (trailers 30 days, trucks 60 days) |
 | `sw.js` | offline app shell; bump `VERSION` on each release |
 | `supabase/functions/fleet-live/index.ts` | the Samsara proxy |

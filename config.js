@@ -22,5 +22,10 @@ window.FLEET_CONFIG = {
   TRUCK_INACTIVE_DAYS: 60,
   // Fuel colors, same cutoffs as Fleet Command: amber under LOW, red under CRITICAL
   FUEL_LOW_PCT: 25,
-  FUEL_CRITICAL_PCT: 15
+  FUEL_CRITICAL_PCT: 15,
+  // Yard checks (same Supabase functions the Driver Toolkit uses)
+  YARD_API: 'https://tjivcqxnkftujceumdtx.supabase.co/functions/v1/',
+  YARD_RECENT_DAYS: 14,      // map pins + "no GPS" counts use checks this recent
+  YARD_LIST_DAYS: 30,        // Yards tab lists these first; older ones behind a button
+  YARD_REFRESH_SECONDS: 120
 };
