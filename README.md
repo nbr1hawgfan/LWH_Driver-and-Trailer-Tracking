@@ -1,6 +1,6 @@
-# LWH Fleet View — v1.9
+# LWH Fleet View — v1.10
 
-Live map and "who's headed my way" list of trucks, drivers and trailers for LWH managers.
+Live map and list of trucks, drivers and trailers for LWH managers.
 GitHub Pages PWA + one Supabase Edge Function (`fleet-live`) in the **LWH Companion** project.
 
 ```
@@ -78,13 +78,17 @@ On phones: open the URL → Share → **Add to Home Screen**.
 - **Who set a trailer empty/loaded:** `select * from fleet_trailer_load_log order by updated_at desc;`
 
 ## Using it
-- **Phone:** the map fills the screen. At rest the bottom panel is one line ("2 headed to Fresno St · 1 low fuel").
-  Tap it or drag it up for the list, the "I'm at" picker and the filters.
+- **Phone:** the map fills the screen. At rest the bottom panel is one line ("2 trucks, 4 trailers at Truck Yard · 3 driving · 1 low fuel").
+  Tap it or drag it up for the list, the "I'm at" picker and the Filters button.
 - **Search** like Google Maps: type a truck number, trailer number or driver name and pick a match.
   The app then focuses on it: flies there, fades everything else, follows it as it moves, draws its route,
-  and shows its details (status, ETA, fuel, MPG, engine, trailer, last GPS). Tapping a row in the list does the same.
+  and shows its details (status, distance, fuel, MPG, engine, trailer, last GPS). Tapping a row in the list does the same.
   Clear the search or tap the X on the card to go back to everything. Drag the map and it stops following; tap **Follow** to resume.
-- **PC:** the list sits in a panel on the left of the map.
+- **PC:** the map gets the whole screen. The list panel is closed until you tap the list button in the search bar
+  (or the one-line summary under it); each computer remembers open or closed. Searching or tapping a truck still opens its card.
+- **List:** one line per truck or trailer (name, driver or Empty/Loaded, Driving + mph / Parked / distance). Fuel only shows when low.
+  Tap a row for the full card (fuel, MPG, engine, route, Empty/Loaded buttons). "At <site>" starts collapsed; tap a section header to open or close it.
+- **Filters** button holds Trucks / Trailers / Low fuel / Empty only / Inactive / No-GPS trailers; it shows a count when anything is changed.
 - **Tap a truck** to see its last 8 hours as a blue route, with each stop of 5+ minutes labeled with how long it sat. Tap the map to clear it.
 - **Fuel:** every truck shows its fuel level from Samsara, with a 7-day MPG figure when it has driven 25+ miles that week.
   Amber under 25%, red under 15%. Low trucks get a fuel tag on their map badge, and the **Low fuel** button lists just those trucks.
@@ -127,8 +131,6 @@ deployed in LWH Companion; see the Driver Toolkit repo's `supabase/README.md`). 
 ## How the "smart" parts work
 
 - **At a site:** GPS point inside the Samsara geofence (polygon or circle), same math as the Dwell Tracker.
-- **Headed your way / ETA:** moving, and heading within 50° of the bearing to your site.
-  ETA = straight-line miles × 1.25 ÷ speed (25 mph inside 3 mi, 35–60 mph otherwise). Rough by design.
 - **Likely pulling:** trailer and truck both moving, within 0.3 mi (plus slack for an older trailer
   ping) with headings within 60°; or both parked within ~175 yards *off-site*. Never guessed inside
   a yard. Always labeled "likely."
@@ -145,5 +147,5 @@ deployed in LWH Companion; see the Driver Toolkit repo's `supabase/README.md`). 
 | `supabase/migrations/…sql` | tables + seed data (v1 and v2, both already applied) |
 
 ## Phase 2 ideas
-Routed ETAs (OpenRouteService), per-person PINs, share Load Status with the Pernod Dwell Tracker,
+Per-person PINs, share Load Status with the Pernod Dwell Tracker,
 trailer dwell timers ("at Pernod 3 days").
