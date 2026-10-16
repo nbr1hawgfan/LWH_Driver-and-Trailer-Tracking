@@ -27,5 +27,9 @@ window.FLEET_CONFIG = {
   YARD_API: 'https://tjivcqxnkftujceumdtx.supabase.co/functions/v1/',
   YARD_RECENT_DAYS: 14,      // map pins + "no GPS" counts use checks this recent
   YARD_LIST_DAYS: 30,        // Yards tab lists these first; older ones behind a button
-  YARD_REFRESH_SECONDS: 120
+  YARD_REFRESH_SECONDS: 120,
+  // Trailer sitting time turns amber at this many days
+  DWELL_WARN_DAYS: 3,
+  // DVIR defects count as "open" on the map (red tag, filter) when unsafe or reported within this many days
+  DEFECT_RECENT_DAYS: 14
 };

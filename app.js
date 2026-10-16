@@ -20,12 +20,13 @@
     user: store('fv_user') || '',
     siteName: store('fv_site') || '',
     data: null, lastOk: 0, loading: false,
-    filters: { trucks: true, trailers: true, empty: false, dead: false, lowfuel: false, nogps: true, q: '' },
+    filters: { trucks: true, trailers: true, empty: false, dead: false, lowfuel: false, nogps: true, defects: false, longest: false, q: '' },
     map: null, markers: {}, sitesDrawn: false, centeredOnce: false, clusters: [], siteTags: {}, proj: null,
     info: null, infoKey: null, selKey: null,
     trail: null, trailInfo: {},
     pendingLoad: {},
     focusKey: null, follow: true,
+    tHist: {},            // trailer id -> its last 7 days (stays), loaded on tap
     // PC: list panel starts closed so the map gets the screen; remembered per device
     panelOpen: store('fv_panel') === 'open',
     filtersOpen: false,
@@ -103,6 +104,69 @@
     return pct < (CFG.FUEL_CRITICAL_PCT || 15) ? 'crit' : pct < (CFG.FUEL_LOW_PCT || 25) ? 'low' : 'ok';
   }
   function isLowFuel(t) { return t.fuel != null && t.fuel < (CFG.FUEL_LOW_PCT || 25) && !isInactiveTruck(t); }
+
+  // ---- DVIR (Samsara E-Log) ----
+  var DVIR_TYPE = { preTrip: 'Pre-trip', postTrip: 'Post-trip', unspecified: 'DVIR' };
+  var DEFECT_RECENT_DAYS = CFG.DEFECT_RECENT_DAYS || 14;
+  function recentDefect(d) { return d.unsafe || (d.created && Date.now() - Date.parse(d.created) < DEFECT_RECENT_DAYS * 86400000); }
+  // Red tag / "Open defects" filter: unsafe, or reported recently. Old write-ups nobody
+  // closed in Samsara still show on the card, just not on the map.
+  function hasDefect(t) { return !!(t.dvir && t.dvir.open && t.dvir.open.some(recentDefect)); }
+  // Drivers often re-report the same problem every day: one line per defect type.
+  function groupDefects(open) {
+    var g = {}, order = [];
+    (open || []).forEach(function (d) {
+      var k = d.label.toLowerCase();
+      if (!g[k]) { g[k] = { label: d.label, n: 0, unsafe: false, recent: false, first: d.created, last: d.created, comment: d.comment }; order.push(k); }
+      var x = g[k]; x.n++; x.unsafe = x.unsafe || d.unsafe; x.recent = x.recent || recentDefect(d);
+      if (d.created && (!x.first || d.created < x.first)) x.first = d.created;
+      if (d.created && (!x.last || d.created >= x.last)) { x.last = d.created; if (d.comment) x.comment = d.comment; }
+    });
+    return order.map(function (k) { return g[k]; }).sort(function (a, b) { return (b.recent - a.recent) || (b.last > a.last ? 1 : -1); });
+  }
+  function dvirStatusNote() {
+    var st = S.data && S.data.dvirStatus;
+    return st && st !== 'ok' && st !== 'loading' ? st : '';
+  }
+  function dvirStats(t) {
+    var v = t.dvir, h = '<dt>DVIR</dt><dd>';
+    if (!v || !v.last) {
+      var note = dvirStatusNote();
+      h += note ? '<span class="dv-note">' + esc(note) + '</span>' : S.data && S.data.dvirStatus === 'loading' ? 'Loading' : 'None in the last 7 days';
+    } else {
+      var L = v.last, bad = L.safety === 'unsafe';
+      h += '<span class="dv-' + (bad ? 'bad' : 'ok') + '">' + esc(DVIR_TYPE[L.type] || 'DVIR') + ', ' + (bad ? 'unsafe' : L.safety === 'resolved' ? 'resolved' : 'safe') + '</span>' +
+        '<br>' + esc(sinceText(L.time)) + (L.by ? ', ' + esc(L.by) : '');
+    }
+    h += '</dd>';
+    if (v && v.open && v.open.length) {
+      h += '<dt>Defects</dt><dd>' + groupDefects(v.open).map(function (d) {
+        var when = d.n > 1 ? d.n + ' reports since ' + new Date(d.first).toLocaleDateString([], { month: 'short', day: 'numeric' }) + ', latest ' + sinceText(d.last)
+                           : 'Reported ' + sinceText(d.last);
+        return '<div class="dv-defect' + (d.unsafe ? ' bad' : '') + (d.recent ? '' : ' old') + '"><b>' + esc(d.label) + '</b>' + (d.unsafe ? ' <span class="badge dmg">Unsafe</span>' : '') +
+          (d.comment ? '<br>' + esc(d.comment) : '') + '<br><small>' + esc(when) + (d.recent ? ', not fixed' : '. Older, never marked fixed in Samsara') + '</small></div>';
+      }).join('') + '</dd>';
+    }
+    return h;
+  }
+
+  // ---- how long a trailer has been sitting ----
+  function dwellMin(dw) { return dw ? Math.max(0, Math.round((Date.now() - Date.parse(dw.since)) / 60000)) : 0; }
+  function durText(min) {
+    if (min < 60) return min < 5 ? 'just arrived' : min + ' min';
+    var h = Math.floor(min / 60);
+    if (h < 24) return h + ' hr';
+    var d = Math.floor(h / 24);
+    return d + (d === 1 ? ' day' : ' days');
+  }
+  function dwellShort(dw) { return !dw ? '' : dw.floor ? '7+ days' : durText(dwellMin(dw)); }
+  function dwellLong(dw) {
+    if (!dw) return '';
+    var where = dw.site ? 'At ' + dw.site : 'Parked here';
+    return dw.floor ? where + ' all week (since before ' + new Date(dw.since).toLocaleDateString([], { month: 'short', day: 'numeric' }) + ')'
+                    : where + ' since ' + sinceText(dw.since) + ' (' + durText(dwellMin(dw)) + ')';
+  }
+  function isLongDwell(dw) { return !!dw && (dw.floor || dwellMin(dw) >= (CFG.DWELL_WARN_DAYS || 3) * 1440); }
   function fuelRow(t) {
     if (t.fuel == null && t.mpg7 == null) return '';
     var lv = fuelLevel(t.fuel);
@@ -287,7 +351,7 @@
     });
   });
   // Filters sit behind one button; the count shows when anything is changed from normal.
-  var FILTER_DEFAULTS = { empty: false, dead: false, lowfuel: false, nogps: true };
+  var FILTER_DEFAULTS = { empty: false, dead: false, lowfuel: false, nogps: true, defects: false, longest: false };
 
   // Both / Trucks / Trailers switch on the map. Remembered per device.
   function applyShow(mode) {
@@ -496,6 +560,10 @@
     chip.textContent = 'Inactive (' + deadN + ')';
     chip.hidden = deadN === 0;
     var lowN = S.data.trucks.filter(isLowFuel).length;
+    var defN = S.data.trucks.filter(hasDefect).length;
+    var dchip = document.querySelector('.chip[data-filter="defects"]');
+    dchip.textContent = 'Open defects (' + defN + ')';
+    dchip.hidden = defN === 0 && !S.filters.defects;
     var lchip = document.querySelector('.chip[data-filter="lowfuel"]');
     lchip.textContent = 'Low fuel (' + lowN + ')';
     lchip.hidden = lowN === 0 && !S.filters.lowfuel;
@@ -531,13 +599,14 @@
     return S.data.trucks.filter(function (t) {
       if (!S.filters.dead && isInactiveTruck(t)) return false;
       if (S.filters.lowfuel && !isLowFuel(t)) return false;
+      if (S.filters.defects && !hasDefect(t)) return false;
       var trs = pulls[t.id] || [];
       if (S.filters.empty && !trs.some(function (r) { return r.load && r.load.status === 'empty'; })) return false;
       return matchesSearch(t, trs.map(function (r) { return r.name; }));
     });
   }
   function visibleTrailers(tById) {
-    if (!S.filters.trailers || S.filters.lowfuel) return [];
+    if (!S.filters.trailers || S.filters.lowfuel || S.filters.defects) return [];
     return S.data.trailers.filter(function (r) {
       if (!S.filters.dead && isDead(r)) return false;
       if (S.filters.empty && !(r.load && r.load.status === 'empty')) return false;
@@ -572,6 +641,12 @@
       .sort(function (x, y) { return x.kind === y.kind ? byName(x, y) : x.kind === 'truck' ? -1 : 1; });
     var other = items.filter(function (i) { return i.d.group !== 'here'; })
       .sort(function (x, y) { return (x.d.dist == null || y.d.dist == null) ? byName(x, y) : x.d.dist - y.d.dist; });
+    if (S.filters.longest) {
+      // trailers that have sat the longest first; anything without a sitting time after them
+      var since = function (i) { var dw = i.kind === 'trailer' && !i.truck ? i.a.dwell : null; return dw ? (dw.floor ? 0 : Date.parse(dw.since)) : Infinity; };
+      var bySit = function (x, y) { return since(x) - since(y) || byName(x, y); };
+      here.sort(bySit); other.sort(bySit);
+    }
 
     var name = site ? site.name : 'your site';
     var hereTrucks = here.filter(function (i) { return i.kind === 'truck'; }).length;
@@ -589,7 +664,7 @@
     updateClock();
     $('list').innerHTML =
       section('here', 'At ' + name, here, 'Nothing is on site.') +
-      section('other', 'Everything else, nearest first', other, items.length ? 'Nothing else.' : 'No matches. Try a different search or turn a filter back on.');
+      section('other', S.filters.longest ? 'Everything else, sitting longest first' : 'Everything else, nearest first', other, items.length ? 'Nothing else.' : 'No matches. Try a different search or turn a filter back on.');
   }
 
   function section(id, title, list, emptyMsg) {
@@ -613,9 +688,12 @@
     } else {
       sub = loadBadge(a.load) + (i.truck ? ' <span class="with">with ' + esc(shortLabel(i.truck.name)) + '</span>' : '');
     }
+    var dw = i.kind === 'trailer' && !i.truck ? a.dwell : null;
     var right = d.mph != null ? '<span class="spd ' + speedClass(d.mph) + '">' + Math.round(d.mph) + ' mph</span>'
+      : dw ? '<span class="r-dwell' + (isLongDwell(dw) ? ' long' : '') + '">' + esc(dwellShort(dw)) + '</span>'
       : d.group === 'here' ? '' : (d.dist ? fmtMi(d.dist) + ' mi' : '');
     var fuel = i.kind === 'truck' && isLowFuel(a) ? '<span class="r-fuel ' + fuelLevel(a.fuel) + '">' + FUEL_ICON + a.fuel + '%</span>' : '';
+    if (i.kind === 'truck' && hasDefect(a)) fuel = '<span class="r-dvir">Defect</span>' + fuel;
     return '<div class="row" data-key="' + esc(key) + '" role="button" tabindex="0">' +
       '<span class="kind-ic sm ' + i.kind + '">' + (i.kind === 'truck' ? ICON_TRUCK : ICON_TRAILER) + '</span>' +
       '<span class="r-main"><span class="r-name">' + esc(displayName(i.kind, a.name)) + '</span><span class="r-sub">' + sub + '</span></span>' +
@@ -910,6 +988,7 @@
       esc(shortLabel(t.name)) +
       (moving ? '<span class="spd ' + speedClass(t.speed) + '">' + Math.round(t.speed) + '</span>' : '') +
       (isLowFuel(t) ? '<span class="mk-fuel ' + fuelLevel(t.fuel) + '">' + FUEL_ICON + t.fuel + '%</span>' : '') +
+      (hasDefect(t) ? '<span class="mk-dvir" title="Open DVIR defect">DVIR</span>' : '') +
       tow + '</span></div>';
   }
   function trailerHtml(r, sel) {
@@ -938,6 +1017,8 @@
         (t.site ? ', at ' + esc(t.site) : '') + '</div>' +
       (pulls && pulls.length ? '<div class="pop-sub">Likely pulling ' + pulls.map(function (r) { return esc(r.name) + (r.load ? ' (' + r.load.status + ')' : ''); }).join(', ') + '</div>' : '') +
       fuelRow(t) +
+      (hasDefect(t) ? '<div class="pop-sub dv-bad">Open defect: ' + groupDefects(t.dvir.open).filter(function (d) { return d.recent; }).map(function (d) { return esc(d.label); }).join(', ') + '</div>'
+        : t.dvir && t.dvir.last ? '<div class="pop-sub">' + esc(DVIR_TYPE[t.dvir.last.type] || 'DVIR') + ' ' + esc(t.dvir.last.safety || '') + ', ' + esc(sinceText(t.dvir.last.time)) + '</div>' : '') +
       '<div class="pop-meta">' + esc(t.address || '') + (t.address ? '<br>' : '') + 'GPS ' + esc(agoText(ageMin(t.time))) + '</div>' +
       svButton(t.lat, t.lng) + route + '</div>';
   }
@@ -945,6 +1026,7 @@
     return '<div class="pop"><div class="pop-name">' + esc(displayName('trailer', r.name)) + '</div>' +
       '<div class="pop-sub">' + (r.load ? (r.load.status === 'empty' ? 'Empty' : 'Loaded') : 'Status not set') + (r.site ? ', at ' + esc(r.site) : '') + '</div>' +
       (tk ? '<div class="pop-sub">Likely with ' + esc(displayName('truck', tk.name)) + (tk.driver ? ', ' + esc(tk.driver) : '') + '</div>' : '') +
+      (!tk && r.dwell ? '<div class="pop-sub' + (isLongDwell(r.dwell) ? ' dw-long' : '') + '">' + esc(dwellLong(r.dwell)) + '</div>' : '') +
       '<div class="pop-meta">' + esc(r.address || '') + (r.address ? '<br>' : '') + 'GPS ' + esc(agoText(ageMin(r.time))) + '</div>' +
       (window.FVYard ? '<dl class="fc-stats pop-yc">' + window.FVYard.trailerStats(r) + '</dl>' : '') +
       svButton(r.lat, r.lng) + (window.FVYard ? window.FVYard.addButton(r) : '') + '</div>';
@@ -1281,6 +1363,7 @@
     var mk = focusMarkerKey();
     select(mk);
     if (mk && mk.charAt(0) === 't') showTrail(mk.slice(2)); else clearTrail();
+    if (kind === 'trailer') loadMoves(it.id, !(mk && mk.charAt(0) === 't'));
     setTimeout(function () { followFocused(true); }, isDesktop() ? 0 : 280);
   }
 
@@ -1346,9 +1429,11 @@
       if (it.engine) h += '<dt>Engine</dt><dd>' + esc(it.engine) + (it.engineSince ? ' since ' + esc(sinceText(it.engineSince)) : '') + '</dd>';
       var trs = pulls[it.id] || [];
       if (trs.length) h += '<dt>Pulling</dt><dd>' + trs.map(function (r) { return esc(r.name) + ' ' + loadBadge(r.load); }).join(', ') + ' <span class="likely">likely</span></dd>';
+      h += dvirStats(it);
     } else if (tk) {
       h += '<dt>With</dt><dd>' + esc(displayName('truck', tk.name)) + (tk.driver ? ', ' + esc(tk.driver) : '') + ' <span class="likely">likely</span></dd>';
     }
+    if (kind === 'trailer' && !tk && it.dwell) h += '<dt>Sitting</dt><dd class="' + (isLongDwell(it.dwell) ? 'dw-long' : '') + '">' + esc(dwellLong(it.dwell)) + '</dd>';
     h += '<dt>Last GPS</dt><dd>' + esc(agoText(ageMin(basis.time))) + '</dd>';
     if (kind === 'trailer' && window.FVYard) h += window.FVYard.trailerStats(it);
     if (kind === 'trailer' && it.load) h += '<dt>Marked</dt><dd>' + esc(it.load.status) + (it.load.by ? ' by ' + esc(it.load.by) : '') + ', ' + esc(agoText(ageMin(it.load.at))) + '</dd>';
@@ -1356,6 +1441,7 @@
 
     var addr = (tk ? tk.address : it.address) || '';
     if (addr) h += '<div class="fc-addr">' + esc(addr) + '</div>';
+    if (kind === 'trailer') h += movesHtml(it, !!tk);
 
     var truckId = kind === 'truck' ? it.id : (tk ? tk.id : null);
     if (truckId && S.trail && S.trail.id === truckId) {
@@ -1376,11 +1462,84 @@
     if (truckId) h += S.trail && S.trail.id === truckId
       ? '<button class="act" type="button" data-hide-route>Hide route</button>'
       : '<button class="act" type="button" data-show-route="' + esc(truckId) + '">Show route</button>';
+    else if (kind === 'trailer' && S.tHist[it.id] && S.tHist[it.id].data && S.tHist[it.id].data.points.length > 1) h += S.trail && S.trail.id === 'r:' + it.id
+      ? '<button class="act" type="button" data-hide-route>Hide moves</button>'
+      : '<button class="act" type="button" data-show-moves="' + esc(it.id) + '">Show moves</button>';
     h += svButton(basis.lat, basis.lng);
     if (kind === 'trailer' && window.FVYard) h += window.FVYard.addButton(it);
     h += '</div>';
     box.innerHTML = h;
   }
+
+  // ---------------- trailer: where it's been (last 7 days) ----------------
+  function stayLabel(st) { return st.site || (st.address ? st.address.split(',')[0] : 'Parked off-site'); }
+  function movesHtml(r, towed) {
+    var h = S.tHist[r.id];
+    var out = '<div class="fc-moves"><div class="fm-h">Last 7 days</div>';
+    if (!h || h.loading) return out + '<div class="fm-note">Loading where it has been</div></div>';
+    if (h.err) return out + '<div class="fm-note">Did not load: ' + esc(h.err) + '</div></div>';
+    var stays = (h.data.stays || []).slice().reverse();
+    if (!stays.length) return out + '<div class="fm-note">' + (h.data.pings ? 'Only on the road, no stops of 20+ minutes.' : 'No GPS from this trailer in the last 7 days.') + '</div></div>';
+    out += '<ol class="fm-list">' + stays.slice(0, 12).map(function (st, i) {
+      var cur = i === 0 && !towed && Date.now() - Date.parse(st.to) < 36 * 3600000 && r.speed <= MOVING_MPH;
+      var mins = Math.round(((cur ? Date.now() : Date.parse(st.to)) - Date.parse(st.from)) / 60000);
+      var when = st.floor ? 'all week, since before ' + new Date(st.from).toLocaleDateString([], { month: 'short', day: 'numeric' })
+        : sinceText(st.from) + (cur ? ' to now' : ' to ' + sinceText(st.to));
+      return '<li' + (cur ? ' class="cur"' : '') + '><button type="button" class="fm-stay" data-fly="' + st.lat + ',' + st.lng + '">' +
+        '<span class="fm-place">' + esc(stayLabel(st)) + '</span>' +
+        '<span class="fm-when">' + esc(when) + (st.floor ? '' : ' &middot; ' + esc(durText(mins))) + '</span></button></li>';
+    }).join('') + '</ol>';
+    if (h.data.miles) out += '<div class="fm-note">' + h.data.miles + ' miles driven this week</div>';
+    return out + '</div>';
+  }
+  function loadMoves(trailerId, draw) {
+    var cur = S.tHist[trailerId];
+    if (cur && cur.data && Date.now() - cur.at < 120000) { if (draw) drawMoves(trailerId); renderFocus(); return; }
+    S.tHist[trailerId] = { loading: true, at: Date.now() };
+    renderFocus();
+    api('trailerTrail', { trailerId: trailerId, days: 7 }).then(function (j) {
+      S.tHist[trailerId] = j.ok ? { data: j, at: Date.now() } : { err: j.error || 'unknown error', at: Date.now() };
+    }).catch(function () {
+      S.tHist[trailerId] = { err: 'no connection', at: Date.now() };
+    }).then(function () {
+      if (S.focusKey === 'r:' + trailerId) { if (draw) drawMoves(trailerId); renderFocus(); }
+    });
+  }
+  // dashed navy line through the week, with a tag at each stop
+  function drawMoves(trailerId) {
+    var h = S.tHist[trailerId];
+    if (!S.map || !h || !h.data || h.data.points.length < 2) return;
+    clearTrail();
+    var path = h.data.points.map(function (p) { return new google.maps.LatLng(p[0], p[1]); });
+    var dash = { path: 'M 0,-1 0,1', strokeOpacity: 1, strokeColor: '#1b2d52', scale: 3 };
+    var token = { id: 'r:' + trailerId, stops: [], line: [
+      new google.maps.Polyline({ path: path, strokeOpacity: 0, zIndex: 5, clickable: false, map: S.map, icons: [{ icon: dash, offset: '0', repeat: '14px' }] })
+    ] };
+    var stays = h.data.stays || [];
+    token.stops = stays.map(function (st, i) {
+      var mins = Math.round((Date.parse(st.to) - Date.parse(st.from)) / 60000);
+      var m = new HtmlMarker(new google.maps.LatLng(st.lat, st.lng),
+        '<div class="mk"><span class="stop-tag mv">' + esc(i === stays.length - 1 ? 'Now' : durText(mins)) + '</span></div>', 8, function () {
+          S.info.setContent('<div class="pop"><div class="pop-name">' + esc(stayLabel(st)) + '</div>' +
+            '<div class="pop-sub">' + esc(sinceText(st.from)) + ' to ' + esc(sinceText(st.to)) + '</div></div>');
+          S.info.setPosition(m.pos); S.info.open({ map: S.map }); S.infoKey = 'stop';
+        });
+      m.setMap(S.map);
+      return m;
+    });
+    S.trail = token;
+  }
+  document.addEventListener('click', function (e) {
+    var b = e.target.closest('[data-show-moves]');
+    if (b) { drawMoves(b.getAttribute('data-show-moves')); renderFocus(); return; }
+    var f = e.target.closest('[data-fly]');
+    if (f && S.map) {
+      var p = f.getAttribute('data-fly').split(',');
+      S.follow = false;
+      focusAt(new google.maps.LatLng(Number(p[0]), Number(p[1])), 15);
+      renderFocus();
+    }
+  });
 
   // ---------------- route trail ----------------
   function clearTrail() {

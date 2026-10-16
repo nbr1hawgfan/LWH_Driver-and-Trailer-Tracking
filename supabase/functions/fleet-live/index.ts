@@ -573,6 +573,249 @@ async function loadStatuses(): Promise<Record<string, any>> {
   return out;
 }
 
+// ---------------- background jobs shared through fleet_job_cache ----------------
+// Same idea as the MPG cache: hand back the last result right away and refresh
+// in the background, so Samsara reports never slow down the live map.
+type Job = { key: string; ttl: number; mem: { at: number; body: any } | null; running: boolean; run: (prev: any) => Promise<any> };
+
+async function getJob(job: Job): Promise<any> {
+  if (job.mem && Date.now() - job.mem.at < job.ttl) return job.mem.body;
+  const { data } = await sb.from("fleet_job_cache").select("body, built_at").eq("key", job.key).maybeSingle();
+  const prev = data?.body ?? null;
+  // a job that still has work queued (dwell first pass) asks to run again soon
+  const ttl = prev?.pending ? 60_000 : job.ttl;
+  if (data && Date.now() - Date.parse(data.built_at) < ttl) {
+    job.mem = { at: Date.parse(data.built_at) - (job.ttl - ttl), body: prev };
+    return prev;
+  }
+  if (!job.running) {
+    job.running = true;
+    const p = job.run(prev)
+      .then(async (body) => {
+        const { error } = await sb.from("fleet_job_cache").upsert({ key: job.key, body, built_at: new Date().toISOString() });
+        if (error) console.log(job.key + " save failed: " + error.message);
+        job.mem = { at: Date.now() - (body?.pending ? job.ttl - 60_000 : 0), body };
+      })
+      .catch((e) => console.log(job.key + " job failed: " + e))
+      .finally(() => { job.running = false; });
+    (globalThis as any).EdgeRuntime?.waitUntil?.(p);
+  }
+  job.mem = { at: Date.now() - job.ttl + 2 * 60_000, body: prev };   // this instance waits 2 min before trying again
+  return prev;
+}
+
+// ---------------- trailer sitting time ("at Pernod since Tue") ----------------
+// Follows every trailer's GPS history. First pass looks back 7 days (in batches,
+// so it never runs too long); after that each run only reads what's new.
+const DWELL_DAYS = 7;
+const DWELL_SAME_MI = 0.25;          // off-site: still the same spot within a quarter mile
+const DWELL_MOVING_MPH = 5;
+const DWELL_BATCH = 25;              // trailers per first-pass history call
+const DWELL_FIRST_PASS_PER_RUN = 4;  // batches per run (keeps each run well under the time limit)
+
+type DwellState = { kind: "site" | "off" | "moving"; site: string | null; lat: number; lng: number;
+  since: number; lastT: number; floor: boolean; addr: string };
+type GpsPt = { lat: number; lng: number; t: number; mph: number; addr: string };
+
+function gpsPoints(raw: any[]): GpsPt[] {
+  return raw
+    .filter((p) => typeof p?.latitude === "number" && typeof p?.longitude === "number" && p.time)
+    .map((p) => ({ lat: p.latitude, lng: p.longitude, t: Date.parse(p.time), mph: Number(p.speedMilesPerHour ?? 0) || 0,
+                   addr: p.reverseGeo?.formattedLocation || "" }))
+    .filter((p) => !isNaN(p.t))
+    .sort((a, b) => a.t - b.t);
+}
+
+// One GPS point moves the state machine on. Returns true when the trailer changed place.
+function dwellStep(st: DwellState | null, p: GpsPt, sites: Site[], first: boolean): { st: DwellState; changed: boolean } {
+  const site = siteFor(p.lat, p.lng, sites);
+  let same = false;
+  if (st) {
+    if (site) same = st.kind === "site" && st.site === site;
+    else if (st.kind === "off") same = miles(st.lat, st.lng, p.lat, p.lng) <= DWELL_SAME_MI;
+    else if (st.kind === "moving") same = p.mph > DWELL_MOVING_MPH;
+  }
+  if (st && same) {
+    st.lastT = p.t;
+    if (!st.addr && p.addr) st.addr = p.addr;
+    return { st, changed: false };
+  }
+  const kind: DwellState["kind"] = site ? "site" : p.mph > DWELL_MOVING_MPH ? "moving" : "off";
+  return { st: { kind, site, lat: p.lat, lng: p.lng, since: p.t, lastT: p.t, floor: first && !st, addr: p.addr }, changed: true };
+}
+
+async function trailerHistory(params: Record<string, string>, maxPages = 60): Promise<Record<string, GpsPt[]>> {
+  const rows = await samsaraAll("/fleet/trailers/stats/history", { types: "gps", ...params }, maxPages);
+  const by: Record<string, any[]> = {};
+  for (const r of rows) if (r?.id && Array.isArray(r.gps)) (by[String(r.id)] = by[String(r.id)] || []).push(...r.gps);
+  const out: Record<string, GpsPt[]> = {};
+  for (const id of Object.keys(by)) out[id] = gpsPoints(by[id]);
+  return out;
+}
+
+const dwellJob: Job = {
+  key: "dwell", ttl: 10 * 60_000, mem: null, running: false,
+  run: async (prev: any) => {
+    const { sites } = await loadConfig();
+    const live = liveCache?.body ?? (await getLive());
+    const ids: string[] = (live?.trailers ?? []).map((t: any) => String(t.id));
+    const now = Date.now();
+    const lastRun = Number(prev?.lastRun) || 0;
+    const fresh = lastRun && now - lastRun < DWELL_DAYS * 86400_000;
+    const state: Record<string, DwellState> = fresh ? (prev.state || {}) : {};
+
+    // 1) catch up the trailers we already follow (one call covers all of them)
+    if (fresh) {
+      const pts = await trailerHistory({ startTime: new Date(lastRun - 15 * 60_000).toISOString(), endTime: new Date(now).toISOString() });
+      for (const id of Object.keys(pts)) {
+        let st = state[id];
+        if (!st) continue;                     // new trailers wait for their first pass
+        for (const p of pts[id]) if (p.t > st.lastT) st = dwellStep(st, p, sites, false).st;
+        state[id] = st;
+      }
+    }
+
+    // 2) first pass (7 days back) for trailers we don't follow yet, a few batches per run
+    const todo = ids.filter((id) => !state[id]);
+    const windowStart = new Date(now - DWELL_DAYS * 86400_000).toISOString();
+    for (let b = 0; b < DWELL_FIRST_PASS_PER_RUN && todo.length; b++) {
+      const batch = todo.splice(0, DWELL_BATCH);
+      const pts = await trailerHistory({ startTime: windowStart, endTime: new Date(now).toISOString(), trailerIds: batch.join(",") });
+      for (const id of batch) {
+        let st: DwellState | null = null;
+        for (const p of pts[id] || []) st = dwellStep(st, p, sites, true).st;
+        // no ping in 7 days: nothing to say, but don't ask again until next week
+        state[id] = st ?? { kind: "off", site: null, lat: 0, lng: 0, since: 0, lastT: now, floor: true, addr: "" };
+      }
+    }
+    return { lastRun: now, pending: todo.length > 0, state };
+  },
+};
+
+function dwellFor(t: any, dw: any): any {
+  const st: DwellState | undefined = dw?.state?.[t.id];
+  if (!st || !st.since || st.kind === "moving" || t.speed > DWELL_MOVING_MPH) return null;
+  const match = st.kind === "site" ? st.site === t.site : (!t.site && miles(st.lat, st.lng, t.lat, t.lng) <= DWELL_SAME_MI + 0.05);
+  if (!match) return null;   // the job hasn't caught up with a move yet
+  return { since: new Date(st.since).toISOString(), floor: st.floor, site: st.site };
+}
+
+// ---------------- one trailer's last 7 days (on tap) ----------------
+const STAY_MIN_MS = 20 * 60_000;
+const trailerTrailCache: Record<string, { at: number; body: any }> = {};
+
+async function buildTrailerTrail(trailerId: string, days: number): Promise<any> {
+  const key = trailerId + ":" + days;
+  const hit = trailerTrailCache[key];
+  if (hit && Date.now() - hit.at < 120_000) return hit.body;
+  const { sites } = await loadConfig();
+  const end = new Date(), start = new Date(end.getTime() - days * 86400_000);
+  const pts = (await trailerHistory({ startTime: start.toISOString(), endTime: end.toISOString(), trailerIds: trailerId }))[trailerId] || [];
+
+  // group points into stays (same site, or same spot off-site) and drives
+  const stays: any[] = [];
+  let st: DwellState | null = null, n = 0, sumLat = 0, sumLng = 0;
+  const close = () => {
+    if (st && st.kind !== "moving" && (st.lastT - st.since >= STAY_MIN_MS || st.site)) {
+      stays.push({ site: st.site, address: st.addr, lat: n ? sumLat / n : st.lat, lng: n ? sumLng / n : st.lng,
+                   from: new Date(st.since).toISOString(), to: new Date(st.lastT).toISOString(), floor: st.floor });
+    }
+  };
+  for (let i = 0; i < pts.length; i++) {
+    const r = dwellStep(st, pts[i], sites, true);
+    if (r.changed) { close(); n = 0; sumLat = 0; sumLng = 0; }
+    st = r.st; n++; sumLat += pts[i].lat; sumLng += pts[i].lng;
+  }
+  close();
+  // merge back-to-back stays at the same site (a gap in pings can split one)
+  const merged: any[] = [];
+  for (const s of stays) {
+    const last = merged[merged.length - 1];
+    if (last && s.site && last.site === s.site) last.to = s.to; else merged.push(s);
+  }
+  let line = pts;
+  if (pts.length > TRAIL_MAX_POINTS) {
+    const step = Math.ceil(pts.length / TRAIL_MAX_POINTS);
+    line = pts.filter((_, i) => i % step === 0 || i === pts.length - 1);
+  }
+  let total = 0;
+  for (let i = 1; i < pts.length; i++) total += miles(pts[i - 1].lat, pts[i - 1].lng, pts[i].lat, pts[i].lng);
+  const body = {
+    ok: true, trailerId, days,
+    points: line.map((p) => [Math.round(p.lat * 1e6) / 1e6, Math.round(p.lng * 1e6) / 1e6]),
+    stays: merged,
+    miles: Math.round(total),
+    pings: pts.length,
+    first: pts.length ? new Date(pts[0].t).toISOString() : null,
+  };
+  trailerTrailCache[key] = { at: Date.now(), body };
+  return body;
+}
+
+// ---------------- truck DVIRs + open defects (Samsara E-Log) ----------------
+const DVIR_DAYS = 7;
+const DEFECT_DAYS = 180;             // open defects reported (or touched) in the last 6 months
+const dvirJob: Job = {
+  key: "dvir", ttl: 15 * 60_000, mem: null, running: false,
+  run: async () => {
+    const end = new Date();
+    const out: any = { byVehicle: {}, err: null, defectErr: null };
+    const friendly = (e: unknown, what: string) => {
+      const m = String(e instanceof Error ? e.message : e);
+      return / 40[13]/.test(m) ? `The Samsara API key can't read ${what}. Add the "Read DVIRs" and "Read Defects" permissions (Maintenance) to the key.` : m.slice(0, 200);
+    };
+    let dvirs: any[] = [];
+    try {
+      dvirs = await samsaraAll("/dvirs/stream", { startTime: new Date(end.getTime() - DVIR_DAYS * 86400_000).toISOString(), endTime: end.toISOString() }, 50);
+    } catch (e) { out.err = friendly(e, "DVIRs"); return out; }
+    let defects: any[] = [];
+    try {
+      defects = await samsaraAll("/defects/stream", { startTime: new Date(end.getTime() - DEFECT_DAYS * 86400_000).toISOString(), endTime: end.toISOString(), isResolved: "false" }, 50);
+    } catch (e) { out.defectErr = friendly(e, "defects"); }
+    const types: Record<string, string> = {};
+    try {
+      const all = await samsaraAll("/defect-types", {}, 10);
+      for (const d of all) if (d?.id) types[String(d.id)] = d.label || d.name || d.defectType || "";
+    } catch (e) { console.log("defect types failed: " + e); }
+    const drivers: Record<string, string> = {};
+    try {
+      for (const status of ["active", "deactivated"]) {
+        const ds = await samsaraAll("/fleet/drivers", { driverActivationStatus: status, limit: "512" }, 10);
+        for (const d of ds) if (d?.id) drivers[String(d.id)] = d.name || "";
+      }
+    } catch (e) { console.log("drivers failed: " + e); }
+
+    const tOf = (d: any) => Date.parse(d.dvirSubmissionTime || d.updatedAtTime || "") || 0;
+    for (const d of dvirs) {
+      const vid = d?.vehicle?.id;
+      if (!vid || d.type === "mechanic") continue;
+      const t = tOf(d);
+      const cur = out.byVehicle[vid]?.last;
+      if (cur && Date.parse(cur.time) >= t) continue;
+      const sig = d.authorSignature?.signatoryUser?.id;
+      out.byVehicle[vid] = out.byVehicle[vid] || { last: null, open: [] };
+      out.byVehicle[vid].last = {
+        type: d.type || "", safety: d.safetyStatus || "", time: new Date(t).toISOString(),
+        by: sig ? (drivers[String(sig)] || "") : "", address: d.formattedAddress || "",
+      };
+    }
+    for (const f of defects) {
+      const vid = f?.vehicle?.id;
+      if (!vid || f.isResolved) continue;
+      out.byVehicle[vid] = out.byVehicle[vid] || { last: null, open: [] };
+      out.byVehicle[vid].open.push({
+        label: types[String(f.defectTypeId)] || "Defect", comment: String(f.comment || "").slice(0, 200),
+        unsafe: f.defectSafetyStatus === "unsafe", created: f.createdAtTime || null,
+      });
+    }
+    for (const v of Object.values(out.byVehicle) as any[]) {
+      v.open.sort((a: any, b: any) => (Date.parse(b.created) || 0) - (Date.parse(a.created) || 0));
+      v.open = v.open.slice(0, 10);
+    }
+    return out;
+  },
+};
+
 // ---------------- handler ----------------
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: { ...CORS, "Content-Type": "application/json" } });
@@ -598,9 +841,17 @@ Deno.serve(async (req) => {
     if (action === "live") {
       syncAddressBookIfDue();
       const [live, loads] = await Promise.all([getLive(), loadStatuses()]);
+      // background jobs: never let them break or slow the live map
+      const [dw, dv] = await Promise.all([
+        getJob(dwellJob).catch((e) => { console.log("dwell: " + e); return null; }),
+        getJob(dvirJob).catch((e) => { console.log("dvir: " + e); return null; }),
+      ]);
       return json({
         ...live,
-        trailers: live.trailers.map((t: any) => ({ ...t, load: loads[t.id] || null })),
+        trucks: live.trucks.map((t: any) => ({ ...t, dvir: dv?.byVehicle?.[t.id] || null })),
+        trailers: live.trailers.map((t: any) => ({ ...t, load: loads[t.id] || null, dwell: dwellFor(t, dw) })),
+        dvirStatus: dv ? (dv.err || dv.defectErr || "ok") : "loading",
+        dwellStatus: dw ? (dw.pending ? "building" : "ok") : "loading",
       });
     }
 
@@ -609,6 +860,13 @@ Deno.serve(async (req) => {
       if (!/^\d{1,20}$/.test(id)) return json({ ok: false, error: "vehicleId required" }, 400);
       const hours = Math.min(Math.max(Number(body.hours) || 8, 1), 12);
       return json(await buildTrail(id, hours));
+    }
+
+    if (action === "trailerTrail") {
+      const id = String(body.trailerId || "").trim();
+      if (!/^\d{1,20}$/.test(id)) return json({ ok: false, error: "trailerId required" }, 400);
+      const days = Math.min(Math.max(Number(body.days) || 7, 1), 7);
+      return json(await buildTrailerTrail(id, days));
     }
 
     if (action === "setLoad") {
