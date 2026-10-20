@@ -133,5 +133,40 @@
   <script src="config.js"></script>
   <script src="yard.js"></script>
   <script src="app.js"></script>
+<!-- LWH-USAGE-START: anonymous app-usage ping (see hub.logisticswarehouse.net/usage/) -->
+<script>
+(function () {
+  var APP = 'Fleet View';
+  var URL_ = 'https://tjivcqxnkftujceumdtx.supabase.co/rest/v1/rpc/log_app_usage';
+  var KEY = 'sb_publishable_PYlWSW6-Gi-QZl91IXUq0Q_W5mO3sDT';
+  var ls = {}; try { ls = window.localStorage || {}; } catch (e) {}
+  function get(k) { try { return ls.getItem(k); } catch (e) { return null; } }
+  function set(k, v) { try { ls.setItem(k, v); } catch (e) {} }
+  var dev = get('lwhUsageDev');
+  if (!dev) { dev = (window.crypto && crypto.randomUUID) ? crypto.randomUUID() : (Date.now().toString(36) + Math.random().toString(36).slice(2)); set('lwhUsageDev', dev); }
+  var standalone = !!((window.matchMedia && matchMedia('(display-mode: standalone)').matches) || navigator.standalone);
+  function queue() { try { return JSON.parse(get('lwhUsageQ') || '[]'); } catch (e) { return []; } }
+  function send(row) {
+    return fetch(URL_, { method: 'POST', keepalive: true, headers: { apikey: KEY, 'Content-Type': 'application/json' }, body: JSON.stringify(row) })
+      .then(function (r) { if (!r.ok) throw 0; });
+  }
+  function flush() {
+    var q = queue(); if (!q.length || !navigator.onLine) return;
+    set('lwhUsageQ', '[]');
+    q.forEach(function (row) { send(row).catch(function () { var r = queue(); r.push(row); set('lwhUsageQ', JSON.stringify(r.slice(-50))); }); });
+  }
+  function track(event) {
+    var row = { p_app: APP, p_event: event || 'open', p_device: dev, p_path: location.pathname, p_standalone: standalone, p_at: new Date().toISOString() };
+    send(row).then(flush).catch(function () { var q = queue(); q.push(row); set('lwhUsageQ', JSON.stringify(q.slice(-50))); });
+  }
+  window.lwhTrack = track; // optional: lwhTrack('bol_created') to count a feature
+  var last = Date.now(); track('open');
+  document.addEventListener('visibilitychange', function () {
+    if (document.visibilityState === 'visible' && Date.now() - last > 30 * 60 * 1000) { last = Date.now(); track('open'); }
+  });
+  window.addEventListener('online', flush);
+})();
+</script>
+<!-- LWH-USAGE-END -->
 </body>
 </html>
